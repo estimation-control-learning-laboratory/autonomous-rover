@@ -29,10 +29,5 @@ void loop() {
     // Update servos
     servoX.write(angleX);
     servoY.write(angleY);
-    
-    // Optional: Send back angles for debugging
-    // Serial.print(angleX);
-    // Serial.print(",");
-    // Serial.println(angleY);
   }
 }
