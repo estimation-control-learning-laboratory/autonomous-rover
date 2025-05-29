@@ -1,0 +1,49 @@
+clear all; close all;
+
+arduinoObj = serialport("COM3", 9600); % CHANGE TO YOUR PORT
+configureTerminator(arduinoObj, "LF");
+disp('Serial connection established');
+
+% Create figure with key press detection
+f = figure('Name', 'Servo Control - Press WASD Keys', ...
+           'NumberTitle', 'off', ...
+           'KeyPressFcn', @(src,event) handleKeyPress(src,event,arduinoObj), ...
+           'CloseRequestFcn', @(src,event) closeFigure(src,arduinoObj));
+
+% Make figure more visible
+set(f, 'Position', [100 100 400 200]);
+uicontrol('Style', 'text', ...
+          'String', 'Click here first, then use WASD keys', ...
+          'Position', [50 80 300 40], ...
+          'FontSize', 12);
+
+disp('Focus on the figure window and press WASD keys');
+
+% Keep figure active
+uiwait(f);
+
+function handleKeyPress(~, event, arduinoObj)
+% Map WASD keys to servo commands
+switch lower(event.Key)
+    case 'w'
+        writeline(arduinoObj, 'I');
+        disp('Sent: I (Forward)');
+    case 's'
+        writeline(arduinoObj, 'K');
+        disp('Sent: K (Backward)');
+    case 'a'
+        writeline(arduinoObj, 'J');
+        disp('Sent: J (Left)');
+    case 'd'
+        writeline(arduinoObj, 'L');
+        disp('Sent: L (Right)');
+    case 'escape'
+        close(gcf);
+end
+end
+
+function closeFigure(src, arduinoObj)
+% Cleanup when closing figure
+delete(arduinoObj);
+delete(src);
+end
