@@ -1,0 +1,71 @@
+clear all;
+close all;
+
+% Initialize data structure with empty arrays
+sensorData = struct(...
+    'Time', [], ...          % Timestamps (seconds)
+    'Accel', [], ...         % [x, y, z] in m/s²
+    'Gyro', [], ...          % [x, y, z] in rad/s
+    'Orient', [], ...        % [roll, pitch, yaw] in degrees
+    'Mag', [], ...           % [x, y, z] in µT
+    'Linear', [], ...        % [x, y, z] in m/s² (gravity-removed)
+    'Temp', [], ...          % Temperature in °C
+    'Calibration', []);      % [Sys, Gyro, Accel, Mag]
+
+% Set up serial port
+arduinoPort = "COM3"; % Change to your Arduino's port
+arduinoObj = serialport(arduinoPort, 115200);
+configureTerminator(arduinoObj, "LF"); % Match Arduino's println()
+
+% Start timer for timestamps
+startTime = tic;
+
+% Main logging loop
+try
+    while true
+        line = readline(arduinoObj);
+        currentTime = toc(startTime);
+        
+        % Parse and store data based on line content
+        if contains(line, 'Accl:')
+            values = sscanf(line, 'Accl: x= %f | y= %f | z= %f');
+            sensorData.Accel(end+1,:) = [currentTime, values'];
+            
+        elseif contains(line, 'Gyro:')
+            values = sscanf(line, 'Gyro: x= %f | y= %f | z= %f');
+            sensorData.Gyro(end+1,:) = [currentTime, values'];
+            
+        elseif contains(line, 'Orient:')
+            values = sscanf(line, 'Orient: x= %f | y= %f | z= %f');
+            sensorData.Orient(end+1,:) = [currentTime, values'];
+            
+        elseif contains(line, 'Mag:')
+            values = sscanf(line, 'Mag: x= %f | y= %f | z= %f');
+            sensorData.Mag(end+1,:) = [currentTime, values'];
+            
+        elseif contains(line, 'Linear:')
+            values = sscanf(line, 'Linear: x= %f | y= %f | z= %f');
+            sensorData.Linear(end+1,:) = [currentTime, values'];
+            
+        elseif contains(line, 'temperature:')
+            temp = sscanf(line, 'temperature: %f');
+            sensorData.Temp(end+1,:) = [currentTime, temp];
+            
+        elseif contains(line, 'Calibration:')
+            cal = sscanf(line, 'Calibration: Sys=%f Gyro=%f Accel=%f Mag=%f');
+            sensorData.Calibration(end+1,:) = [currentTime, cal'];
+        end
+        
+        % Auto-save every 100 samples (adjust as needed)
+        if mod(size(sensorData.Accel, 1), 100) == 0
+            save('BNO055_Data.mat', 'sensorData');
+            disp(['Data saved at t = ' num2str(currentTime) 's']);
+        end
+    end
+catch ME
+    % Save data before exiting on error (e.g., serial disconnect)
+    save('BNO055_Data.mat', 'sensorData');
+    disp('Data saved before exit.');
+    rethrow(ME);
+end
+
