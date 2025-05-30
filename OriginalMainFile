@@ -1,0 +1,228 @@
+/ Copyright 2021 - 2023, Ricardo Quesada
+// SPDX-License-Identifier: Apache 2.0 or LGPL-2.1-or-later/*
+ * This example shows how to use the Controller API.
+ * Modified to control mecanum wheels with a DualShock 4 controller.
+ *
+ * Supported on boards with NINA W10x. In particular, these boards:
+ *  - Arduino MKR WiFi 1010,
+ *  - UNO WiFi Rev.2,
+ *  - Nano RP2040 Connect,
+ *  - Nano 33 IoT,
+ *  - Arduino MKR Vidor 4000
+ */
+#include <Bluepad32.h>
+#include <Arduino.h> // Required for max(), abs(), map() etc.ControllerPtr myControllers[BP32_MAX_CONTROLLERS];// --- Motor Pin Definitions ---
+// Front Left Wheel
+const int FrontLeftPin1 = 12; // Direction Pin 1
+const int FrontLeftPin2 = 9;  // Direction Pin 2
+const int FrontLeftSpeedPin = 10; // PWM Speed Pin// Front Right Wheel
+const int FrontRightPin1 = 1;
+const int FrontRightPin2 = 0;
+const int FrontRightSpeedPin = 11;// Back Right Wheel
+const int BackRightPin1 = 7;
+const int BackRightPin2 = 8;
+const int BackRightSpeedPin = 3;// Back Left Wheel
+const int BackLeftPin1 = 4;
+const int BackLeftPin2 = 6;
+const int BackLeftSpeedPin = 5;// --- Constants for Mecanum Control ---
+const int STICK_DEAD_ZONE = 30; // Dead zone for analog stick (out of 511)
+// Max stick value is 511. Max combined value (diagonal) is 511+511 = 1022
+const int MAX_STICK_VAL = 511; // Bluepad32 analog axis range is -512 to 511
+const int MAX_MOTOR_INPUT = MAX_STICK_VAL; // Max input for individual motor before scaling to PWM// Helper function to control a single motor
+// speed: -255 (full backward) to +255 (full forward)
+void setMotorSpeed(int pin1, int pin2, int speedPin, int speed) {
+  if (speed == 0) {
+    digitalWrite(pin1, LOW);
+    digitalWrite(pin2, LOW);
+    analogWrite(speedPin, 0);
+  } else if (speed > 0) { // Forward
+    digitalWrite(pin1, HIGH);
+    digitalWrite(pin2, LOW);
+    analogWrite(speedPin, constrain(speed, 0, 255));
+  } else { // Backward (speed < 0)
+    digitalWrite(pin1, LOW);
+    digitalWrite(pin2, HIGH);
+    analogWrite(speedPin, constrain(abs(speed), 0, 255));
+  }
+}// Arduino setup function. Runs in CPU 1
+void setup() {
+  // Initialize serial
+  Serial.begin(115200); // Increased baud rate for faster debugging
+  while (!Serial) {
+    ; // Wait for serial port to connect.
+  }  Serial.println("Starting Bluepad32 Mecanum Control Example");  // --- Initialize Motor Pins ---
+  pinMode(FrontLeftPin1, OUTPUT);
+  pinMode(FrontLeftPin2, OUTPUT);
+  pinMode(FrontLeftSpeedPin, OUTPUT);  pinMode(FrontRightPin1, OUTPUT);
+  pinMode(FrontRightPin2, OUTPUT);
+  pinMode(FrontRightSpeedPin, OUTPUT);  pinMode(BackRightPin1, OUTPUT);
+  pinMode(BackRightPin2, OUTPUT);
+  pinMode(BackRightSpeedPin, OUTPUT);  pinMode(BackLeftPin1, OUTPUT);
+  pinMode(BackLeftPin2, OUTPUT);
+  pinMode(BackLeftSpeedPin, OUTPUT);  // Ensure all motors are off initially
+  setMotorSpeed(FrontLeftPin1, FrontLeftPin2, FrontLeftSpeedPin, 0);
+  setMotorSpeed(FrontRightPin1, FrontRightPin2, FrontRightSpeedPin, 0);
+  setMotorSpeed(BackRightPin1, BackRightPin2, BackRightSpeedPin, 0);
+  setMotorSpeed(BackLeftPin1, BackLeftPin2, BackLeftSpeedPin, 0);  String fv = BP32.firmwareVersion();
+  Serial.print("Firmware version installed: ");
+  Serial.println(fv);  const uint8_t* addr = BP32.localBdAddress();
+  Serial.print("BD Address: ");
+  for (int i = 0; i < 6; i++) {
+    Serial.print(addr[i], HEX);
+    if (i < 5)
+      Serial.print(":");
+    else
+      Serial.println();
+  }  BP32.setup(&onConnectedController, &onDisconnectedController);
+  BP32.forgetBluetoothKeys(); // Good for testing, remove for persistent pairing
+  Serial.println("Bluepad32 setup complete. Waiting for controller...");
+}void onConnectedController(ControllerPtr ctl) {
+  bool foundEmptySlot = false;
+  for (int i = 0; i < BP32_MAX_CONTROLLERS; i++) { // Use BP32_MAX_CONTROLLERS
+    if (myControllers[i] == nullptr) {
+      Serial.print("CALLBACK: Controller is connected, index=");
+      Serial.println(i);
+      myControllers[i] = ctl;
+      foundEmptySlot = true;      ControllerProperties properties = ctl->getProperties();
+      char buf[120]; // Increased buffer size
+      sprintf(buf,
+              "BTAddr: %02x:%02x:%02x:%02x:%02x:%02x, VID/PID: %04x:%04x, flags: 0x%02x",
+              properties.btaddr[0], properties.btaddr[1], properties.btaddr[2],
+              properties.btaddr[3], properties.btaddr[4], properties.btaddr[5],
+              properties.vendor_id, properties.product_id, properties.flags);
+      Serial.println(buf);
+      // Controller type (like ctl->getTypeName()) could be printed here if desired.      if (ctl->isGamepad()) {
+        Serial.println("Gamepad connected. Ready for mecanum control.");
+      }
+      break;
+    }
+  }
+  if (!foundEmptySlot) {
+    Serial.println("CALLBACK: Controller connected, but could not find empty slot");
+  }
+}void onDisconnectedController(ControllerPtr ctl) {
+  bool foundGamepad = false;
+  for (int i = 0; i < BP32_MAX_CONTROLLERS; i++) { // Use BP32_MAX_CONTROLLERS
+    if (myControllers[i] == ctl) {
+      Serial.print("CALLBACK: Controller is disconnected from index=");
+      Serial.println(i);
+      myControllers[i] = nullptr;
+      foundGamepad = true;
+      // Stop all motors when controller disconnects
+      setMotorSpeed(FrontLeftPin1, FrontLeftPin2, FrontLeftSpeedPin, 0);
+      setMotorSpeed(FrontRightPin1, FrontRightPin2, FrontRightSpeedPin, 0);
+      setMotorSpeed(BackRightPin1, BackRightPin2, BackRightSpeedPin, 0);
+      setMotorSpeed(BackLeftPin1, BackLeftPin2, BackLeftSpeedPin, 0);
+      Serial.println("All motors stopped due to controller disconnect.");
+      break;
+    }
+  }
+  if (!foundGamepad) {
+    Serial.println("CALLBACK: Controller disconnected, but not found in myControllers");
+  }
+}void processGamepad(ControllerPtr gamepad) {
+  // Read Left Analog Stick
+  // axisX() and axisY() return values from -512 to 511.
+  int stickX = gamepad->axisX();
+  int stickY = gamepad->axisY(); // UP is negative, DOWN is positive.  // Apply Dead Zone
+  if (abs(stickX) < STICK_DEAD_ZONE) stickX = 0;
+  if (abs(stickY) < STICK_DEAD_ZONE) stickY = 0;  // Mecanum Drive Calculation
+  // For Y-axis, invert stickY because up is negative, and we want positive for forward.
+  float forward_input = -stickY;
+  float strafe_input  =  stickX;
+  float rotation_input = 0; // For now, no rotation.
+                           // Could be: gamepad->axisRX(); or (gamepad->triggerR() - gamepad->triggerL());
+                           // Remember to apply deadzone to rotation_input if you use it.  // Calculate raw motor powers
+  // These are standard for an "X" mecanum wheel configuration
+  // (rollers form an X when viewed from top, diagonals point inwards)
+  float fl_power_raw = forward_input + strafe_input + rotation_input;
+  float fr_power_raw = forward_input - strafe_input - rotation_input;
+  float bl_power_raw = forward_input - strafe_input + rotation_input; // If wheels are flipped (e.g. rollers form an O or outwards V)
+  float br_power_raw = forward_input + strafe_input - rotation_input; // then BL and BR strafe/rotation signs might need to flip.  // Find the maximum absolute raw power
+  float max_abs_raw_power = 0;
+  max_abs_raw_power = max(max_abs_raw_power, abs(fl_power_raw));
+  max_abs_raw_power = max(max_abs_raw_power, abs(fr_power_raw));
+  max_abs_raw_power = max(max_abs_raw_power, abs(bl_power_raw));
+  max_abs_raw_power = max(max_abs_raw_power, abs(br_power_raw));  // Normalize motor powers if any exceed MAX_STICK_VAL
+  // This ensures that the proportions between motors are maintained,
+  // preserving the direction of movement, even if the sum of components is large.
+  float fl_power_scaled = fl_power_raw;
+  float fr_power_scaled = fr_power_raw;
+  float bl_power_scaled = bl_power_raw;
+  float br_power_scaled = br_power_raw;  if (max_abs_raw_power > MAX_STICK_VAL) {
+    float scale_factor = (float)MAX_STICK_VAL / max_abs_raw_power;
+    fl_power_scaled *= scale_factor;
+    fr_power_scaled *= scale_factor;
+    bl_power_scaled *= scale_factor;
+    br_power_scaled *= scale_factor;
+  }  // --- New Mapping Logic ---
+  // Manually map the scaled float power (-MAX_STICK_VAL to +MAX_STICK_VAL)
+  // to PWM range (-255 to +255) preserving float precision until the end.  int fl_speed = 0;
+  int fr_speed = 0;
+  int bl_speed = 0;
+  int br_speed = 0;  // Avoid division by zero if MAX_STICK_VAL is 0, though it shouldn't be.
+  if (MAX_STICK_VAL != 0) {
+    fl_speed = (int)round((fl_power_scaled / (float)MAX_STICK_VAL) * 255.0);
+    fr_speed = (int)round((fr_power_scaled / (float)MAX_STICK_VAL) * 255.0);
+    bl_speed = (int)round((bl_power_scaled / (float)MAX_STICK_VAL) * 255.0);
+    br_speed = (int)round((br_power_scaled / (float)MAX_STICK_VAL) * 255.0);
+  }  // Constrain to ensure values are within -255 to 255 for setMotorSpeed
+  fl_speed = constrain(fl_speed, -255, 255);
+  fr_speed = constrain(fr_speed, -255, 255);
+  bl_speed = constrain(bl_speed, -255, 255);
+  br_speed = constrain(br_speed, -255, 255);  // Send commands to motors
+  setMotorSpeed(FrontLeftPin1, FrontLeftPin2, FrontLeftSpeedPin, fl_speed);
+  setMotorSpeed(FrontRightPin1, FrontRightPin2, FrontRightSpeedPin, fr_speed);
+  setMotorSpeed(BackLeftPin1, BackLeftPin2, BackLeftSpeedPin, bl_speed);
+  setMotorSpeed(BackRightPin1, BackRightPin2, BackRightSpeedPin, br_speed);  // Optional: Print motor speeds for debugging
+  // Serial.printf("SX:%4d SY:%4d | FLR:%6.1f FRR:%6.1f BLR:%6.1f BRR:%6.1f | FLS:%4d FRS:%4d BLS:%4d BRS:%4d\n",
+  //               stickX, stickY,
+  //               fl_power_scaled, fr_power_scaled, bl_power_scaled, br_power_scaled,
+  //               fl_speed, fr_speed, bl_speed, br_speed);  // --- Original Button Demo Code ---
+  if (gamepad->a()) { // Cross on DS4
+    static int colorIdx = 0;
+    switch (colorIdx % 3) {
+      case 0: gamepad->setColorLED(255, 0, 0); break; // Red
+      case 1: gamepad->setColorLED(0, 255, 0); break; // Green
+      case 2: gamepad->setColorLED(0, 0, 255); break; // Blue
+    }
+    colorIdx++;
+    // Serial.println("Button A (Cross) pressed - changing LED color");
+  }  if (gamepad->b()) { // Circle on DS4
+    static int led = 0;
+    led++;
+    gamepad->setPlayerLEDs(led & 0x0f);
+    // Serial.println("Button B (Circle) pressed - changing player LEDs");
+  }  if (gamepad->x()) { // Square on DS4
+    gamepad->setRumble(0xc0 /* force */, 0xc0 /* duration ~0.9s */);
+    // Serial.println("Button X (Square) pressed - rumble");
+  }
+}// Unused functions from original example, can be removed if not needed
+void processMouse(ControllerPtr mouse) {
+  char buf[160];
+  sprintf(buf, "Mouse - idx=%d, deltaX:%4li, deltaY:%4li, buttons: 0x%04x",
+          mouse->index(), mouse->deltaX(), mouse->deltaY(), mouse->buttons());
+  Serial.println(buf);
+}void processBalanceBoard(ControllerPtr balance) {
+  char buf[160];
+  sprintf(buf, "BalanceBoard - idx=%d, tl:%4i, tr:%4i, bl: %4i, br: %4i",
+          balance->index(), balance->topLeft(), balance->topRight(),
+          balance->bottomLeft(), balance->bottomRight());
+  Serial.println(buf);
+}// Arduino loop function. Runs in CPU 1
+void loop() {
+  BP32.update();  for (int i = 0; i < BP32_MAX_CONTROLLERS; i++) {
+    ControllerPtr myController = myControllers[i];
+    if (myController && myController->isConnected()) {
+      if (myController->isGamepad()) {
+        processGamepad(myController);
+      } else if (myController->isMouse()) {
+        processMouse(myController); // Kept for completeness, remove if not needed
+      } else if (myController->isBalanceBoard()) {
+        processBalanceBoard(myController); // Kept for completeness, remove if not needed
+      }
+    }
+  }
+  delay(20); // Reduced delay for more responsive control. Original was 150ms.
+             // 15-30ms is a common range for robot control loops.
+}
