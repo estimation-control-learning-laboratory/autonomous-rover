@@ -1,0 +1,78 @@
+int PWM_FR_Motor = 2; // Front Righ Motor PWM Pin
+float RPM = 0;
+
+const int Encoder_PPR = 12;  // Encoder pulses per 360 degrees
+
+int FR_Motor_PinA = 22;  // encoder pin A, must be interrupt capable
+int FR_Motor_PinB = 23;  // encoder pin B, must be interrupt capable
+volatile long encoder_pulse = 0;
+unsigned long prevMillis = 0;
+long interval = 1000;  // time interval
+
+// These Funtions Record the Encoder pulses as we as the direction based on channel A&B
+void readEncoderA() {
+  // CASE1: Pin A
+  // If A = HIGH check B
+  if (digitalRead(FR_Motor_PinA) == HIGH) {
+    if (digitalRead(FR_Motor_PinB) == LOW) {
+      encoder_pulse++;
+    } else {
+      encoder_pulse--;
+    }
+  }
+  // If A = LOW check B
+  else {
+    if (digitalRead(FR_Motor_PinB) == HIGH) {
+      encoder_pulse++;
+    } else {
+      encoder_pulse--;
+    }
+  }
+}
+void readEncoderB() {
+  // CASE 2: Pin B
+  if (digitalRead(FR_Motor_PinB) == HIGH) {
+    if (digitalRead(FR_Motor_PinA) == HIGH) {
+      encoder_pulse++;
+    } else {
+      encoder_pulse--;
+    }
+  } else {
+    if (digitalRead(FR_Motor_PinA) == LOW) {
+      encoder_pulse++;
+    } else {
+      encoder_pulse--;
+    }
+  }
+}
+void setup() {
+  Serial.begin(115200);
+  pinMode(FR_Motor_PinA, INPUT);
+  pinMode(FR_Motor_PinB, INPUT);
+  pinMode(PWM_FR_Motor, OUTPUT);                                                // PWM capable pin
+  attachInterrupt(digitalPinToInterrupt(FR_Motor_PinA), readEncoderA, CHANGE);  // Funtion that checks for pulses
+  attachInterrupt(digitalPinToInterrupt(FR_Motor_PinB), readEncoderB, CHANGE);  // Funtion that checks for pulses
+}
+
+static long last_pulses = 0;
+
+void loop() {
+  if ((millis() - prevMillis) >= interval) {
+    
+    noInterrupts();
+    long currentPulse = encoder_pulse;
+    interrupts();
+
+    long interval_pulses = currentPulse - last_pulses; // calculate pulses over the interval
+    RPM = ((float)interval_pulses / Encoder_PPR) * (60.0 * 1000 / interval) / 180;  //
+    
+    Serial.print("Position: ");
+    Serial.print(currentPulse); // Print the total position
+    Serial.print(" | Ticks in interval: ");
+    Serial.print(interval_pulses);
+    Serial.print(" | RPM: ");
+    Serial.println(RPM);
+    last_pulses = currentPulse; // update last_pulses with cuurrentPulse
+    prevMillis = millis();
+  }
+}
