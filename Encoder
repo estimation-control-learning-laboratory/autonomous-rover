@@ -1,3 +1,7 @@
+#include <Arduino_GigaDisplay_GFX.h> // library for the display shield
+
+GigaDisplay_GFX display; // Create the display object
+
 volatile long encoder_pulse = 0;
 unsigned long prevMillis = 0;
 const long interval = 1000;  // time interval
@@ -60,6 +64,8 @@ void readEncoderB(int encoderIndex) {
 }
 void setup() {
   Serial.begin(115200);
+  display.begin();
+  display.setRotation(1); // Set orientation (0, 1, 2, or 3)
 
   for (int i = 0; i < Num_motors; i++) {
     pinMode(encoderchannelA[i], INPUT_PULLUP);
@@ -87,11 +93,10 @@ void setup() {
 }
 
 void loop() {
-
   if ((millis() - prevMillis) >= interval) {
     prevMillis = millis();
     calculations();
-    displayingData();
+    displayShieldData();
   }
 }
 
@@ -105,8 +110,7 @@ void calculations() {
   }
   interrupts();
   for (int i = 0; i < Num_motors; i++) {
-    long interval_pulses = currentPulses[i] - Last_Measured_Pulses[i];  
-                                                    // calculate pulses over the interval
+    long interval_pulses = currentPulses[i] - Last_Measured_Pulses[i];  // calculate pulses over the interval
     float revolutions = (float)interval_pulses / (ENCODER_PPR * Shaft_Gear_Ratio);
     float rpm_float = (revolutions / interval) * 60000.0; // (rev/ms) * (60000 ms/min)
     RPM[i] = rpm_float;
@@ -119,22 +123,44 @@ void calculations() {
   }
 }
 
-void displayingData() {
-  Serial.println("----------------------------------------------------------");
-  Serial.println("Motor\t|  Total Pulses\t|  RPM\t\t|  Distance (m)");
-  Serial.println("----------------------------------------------------------");
+void displayShieldData() {
+  // Clear the screen with a black background.
+  // Using hex codes (0x0000 for black, 0xFFFF for white) is more robust than color names.
+  display.fillScreen(0x0000);
 
-  char buffer[80];
+  // --- Print Header ---
+  display.setTextColor(0xFFFF);
+  display.setTextSize(3);
+  display.setCursor(10, 10); // Set X, Y position for text
+  display.println("Motor Data");
+  display.drawLine(10, 45, 470, 45, 0xFFFF); // Draw a line under the header
 
+  // --- Print Data Table ---
+  display.setTextSize(2);
+  // Header Row
+  display.setCursor(10, 60);
+  display.print("Motor");
+  display.setCursor(120, 60);
+  display.print("RPM");
+  display.setCursor(240, 60);
+  display.print("Distance (m)");
+
+  // Data Rows
   for (int i = 0; i < Num_motors; i++) {
-    sprintf(buffer, "  %d\t|  %-12ld\t|  %-7.2f\t|  %.3f",
-            i,
-            Last_Measured_Pulses[i],
-            RPM[i],
-            distance[i]);
-    Serial.println(buffer);
+    int y_pos = 90 + (i * 30); // Calculate Y position for each motor row
+
+    // Motor Number
+    display.setCursor(10, y_pos);
+    display.print(i);
+
+    // RPM
+    display.setCursor(120, y_pos);
+    display.print(RPM[i], 2); // Print float with 2 decimal places
+
+    // Distance
+    display.setCursor(240, y_pos);
+    display.print(distance[i], 3); // Print float with 3 decimal places
   }
-  Serial.println();
 }
 
 // Functions to call the main Global Interruptor Functions
