@@ -1,0 +1,204 @@
+#include <Arduino_GigaDisplay_GFX.h>
+
+GigaDisplay_GFX display;
+
+const int Num_motors = 4;
+
+// Motor driver pins
+const int MOTOR_PWM_PINS[Num_motors] = {7, 8, 9, 10};
+const int MOTOR_DIR_A_PINS[Num_motors] = {33, 34, 36, 37};
+const int MOTOR_DIR_B_PINS[Num_motors] = {35, 32, 38, 39};
+
+// Encoder pins
+const int encoderchannelA[Num_motors] = {44, 27, 2, 5};
+const int encoderchannelB[Num_motors] = {45, 26, 3, 4};
+
+// Encoder parameters
+const int ENCODER_PPR = 12; // pulses per rev
+const int Shaft_Gear_Ratio = 120; // gearbox ratio
+const float wheel_radius = 0.048; 
+const float effectivePPR = ENCODER_PPR * Shaft_Gear_Ratio;
+
+// ENCODER VARIABLES 
+volatile long encoder_pulses[Num_motors] = {0, 0, 0, 0};
+long Last_Measured_Pulses[Num_motors] = {0, 0, 0, 0};
+float RPM[Num_motors] = {0, 0, 0, 0};
+
+// PID VARIABLES 
+double Kp = 0.2, Ki = 0.05, Kd = 0.01;
+double targetRPM[Num_motors] = {0, 0, 0, 0};
+double pidError[Num_motors] = {0, 0, 0, 0};
+double lastError[Num_motors] = {0, 0, 0, 0};
+double integral[Num_motors] = {0, 0, 0, 0};
+double derivative[Num_motors] = {0, 0, 0, 0};
+double motorOutput[Num_motors] = {0, 0, 0, 0};
+
+unsigned long lastPIDTime = 0;
+const unsigned long PID_INTERVAL_MS = 100; // PID update every 100ms
+
+// 
+float x_ref = 1.0, y_ref = 0.5, theta_ref = 0.0; // desired pos in meters and radians
+float x_est = 0.0, y_est = 0.0, theta_est = 0.0; // estimated pos from BNO055-sensor
+
+float vx_cmd = 0.0, vy_cmd = 0.0, w_cmd = 0.0; // commanded body velocities
+
+// OUTER CONTROLLER 
+void outerController() {
+  // Position error
+  float ex = x_ref - x_est;
+  float ey = y_ref - y_est;
+  float eth = theta_ref - theta_est;
+
+// Overleaf COntroller
+  float Kp_outer = 1.0;
+  vx_cmd = Kp_outer * ex;
+  vy_cmd = Kp_outer * ey;
+  w_cmd  = Kp_outer * eth;
+
+  float L = 0.2; //
+  float W = 0.2; //
+  float R = wheel_radius;
+
+ // Calculate angular velocities using mecanum inverse kinematics
+  targetRPM[0] = ((vx_cmd - vy_cmd - (L+W)*w_cmd) / R) * 60.0 / (2*PI); // Front Left
+  targetRPM[1] = ((vx_cmd + vy_cmd + (L+W)*w_cmd) / R) * 60.0 / (2*PI); // Front Right
+  targetRPM[2] = ((vx_cmd + vy_cmd - (L+W)*w_cmd) / R) * 60.0 / (2*PI); // Rear Left
+  targetRPM[3] = ((vx_cmd - vy_cmd + (L+W)*w_cmd) / R) * 60.0 / (2*PI); // Rear Right
+}
+
+// INNER controller
+void runPID() {
+  unsigned long now = millis();
+  double dt = (now - lastPIDTime) / 1000.0;
+
+  if (now - lastPIDTime >= PID_INTERVAL_MS) {
+    // Calculate RPM for each motor
+    long currentPulses[Num_motors];
+    noInterrupts();
+    for (int i = 0; i < Num_motors; i++) {
+      currentPulses[i] = encoder_pulses[i];
+    }
+    interrupts();
+
+    for (int i = 0; i < Num_motors; i++) {
+      long interval_pulses = currentPulses[i] - Last_Measured_Pulses[i];
+      float revolutions = (float)interval_pulses / effectivePPR;
+      RPM[i] = (revolutions / dt) * 60.0;
+      Last_Measured_Pulses[i] = currentPulses[i];
+
+      // PID calculations
+      pidError[i] = targetRPM[i] - RPM[i];
+      integral[i] += pidError[i] * dt;
+      derivative[i] = (pidError[i] - lastError[i]) / dt;
+      lastError[i] = pidError[i];
+
+      motorOutput[i] = Kp * pidError[i] + Ki * integral[i] + Kd * derivative[i];
+
+      setMotorSpeed(i, motorOutput[i]);
+    }
+
+    lastPIDTime = now;
+  }
+}
+
+//  MOTOR CONTROL 
+void setMotorSpeed(int motorIndex, double output) {
+  if (output > 0) {
+    digitalWrite(MOTOR_DIR_A_PINS[motorIndex], LOW);
+    digitalWrite(MOTOR_DIR_B_PINS[motorIndex], HIGH);
+  } else if (output < 0) {
+    digitalWrite(MOTOR_DIR_A_PINS[motorIndex], HIGH);
+    digitalWrite(MOTOR_DIR_B_PINS[motorIndex], LOW);
+  } else {
+    digitalWrite(MOTOR_DIR_A_PINS[motorIndex], LOW);
+    digitalWrite(MOTOR_DIR_B_PINS[motorIndex], LOW);
+  }
+  analogWrite(MOTOR_PWM_PINS[motorIndex], constrain(abs(output), 0, 255));
+}
+
+//  ENCODER ISR FUNCTIONS 
+void readEncoderA(int idx) {
+  if (digitalRead(encoderchannelA[idx]) == HIGH) {
+    if (digitalRead(encoderchannelB[idx]) == LOW) encoder_pulses[idx]++;
+    else encoder_pulses[idx]--;
+  } else {
+    if (digitalRead(encoderchannelB[idx]) == HIGH) encoder_pulses[idx]++;
+    else encoder_pulses[idx]--;
+  }
+}
+
+void readEncoderB(int idx) {
+  if (digitalRead(encoderchannelB[idx]) == HIGH) {
+    if (digitalRead(encoderchannelA[idx]) == HIGH) encoder_pulses[idx]++;
+    else encoder_pulses[idx]--;
+  } else {
+    if (digitalRead(encoderchannelA[idx]) == LOW) encoder_pulses[idx]++;
+    else encoder_pulses[idx]--;
+  }
+}
+
+void callInterruptA0(){ readEncoderA(0); }
+void callInterruptB0(){ readEncoderB(0); }
+void callInterruptA1(){ readEncoderA(1); }
+void callInterruptB1(){ readEncoderB(1); }
+void callInterruptA2(){ readEncoderA(2); }
+void callInterruptB2(){ readEncoderB(2); }
+void callInterruptA3(){ readEncoderA(3); }
+void callInterruptB3(){ readEncoderB(3); }
+
+
+//  DISPLAY shield
+void updateDisplay() {
+  display.fillScreen(0x0000);
+  display.setTextColor(0xFFFF);
+  display.setTextSize(2);
+  display.setCursor(10, 10);
+  display.println("Motor | Target | Actual | PWM");
+  display.drawLine(10, 35, 470, 35, 0xFFFF);
+
+  for (int i = 0; i < Num_motors; i++) {
+    int yPos = 50 + (i * 40);
+    char buffer[50];
+    sprintf(buffer, "  %d   | %-6.1f | %-6.1f | %-3d", 
+            i, targetRPM[i], RPM[i], (int)constrain(abs(motorOutput[i]), 0, 255));
+    display.setCursor(10, yPos);
+    display.println(buffer);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  display.begin();
+  display.setRotation(1);
+
+  for (int i = 0; i < Num_motors; i++) {
+    pinMode(MOTOR_PWM_PINS[i], OUTPUT);
+    pinMode(MOTOR_DIR_A_PINS[i], OUTPUT);
+    pinMode(MOTOR_DIR_B_PINS[i], OUTPUT);
+    pinMode(encoderchannelA[i], INPUT_PULLUP);
+    pinMode(encoderchannelB[i], INPUT_PULLUP);
+  }
+
+  attachInterrupt(digitalPinToInterrupt(encoderchannelA[0]), callInterruptA0, RISING);
+  attachInterrupt(digitalPinToInterrupt(encoderchannelB[0]), callInterruptB0, RISING);
+  attachInterrupt(digitalPinToInterrupt(encoderchannelA[1]), callInterruptA1, RISING);
+  attachInterrupt(digitalPinToInterrupt(encoderchannelB[1]), callInterruptB1, RISING);
+  attachInterrupt(digitalPinToInterrupt(encoderchannelA[2]), callInterruptA2, RISING);
+  attachInterrupt(digitalPinToInterrupt(encoderchannelB[2]), callInterruptB2, RISING);
+  attachInterrupt(digitalPinToInterrupt(encoderchannelA[3]), callInterruptA3, RISING);
+  attachInterrupt(digitalPinToInterrupt(encoderchannelB[3]), callInterruptB3, RISING);
+
+  lastPIDTime = millis();
+}
+
+//  LOOP 
+void loop() {
+  outerController(); // high-level control to set targetRPM[]
+  runPID();          // low-level wheel control
+
+  static unsigned long lastDisplayTime = 0;
+  if (millis() - lastDisplayTime > 250) {
+    updateDisplay();
+    lastDisplayTime = millis();
+  }
+}
