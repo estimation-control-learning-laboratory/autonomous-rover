@@ -2,155 +2,153 @@
 
 GigaDisplay_GFX display; 
 
-const int NUM_MOTORS = 4;
+#define NUM_MOTORS 4
+const double Kp = .6;
+const double Ki = 0.2;
+const double Kd = 0;
 
-double Kp[NUM_MOTORS] = {0.2, 0.3, 0.3, 0.2};
-double Ki[NUM_MOTORS] = {0.05, 0.05, 0.05, 0.05};
-double Kd[NUM_MOTORS] = {0.05, 0.01, 0, 0};
+const int ENCODER_PPR = 12;
+const int GEAR_RATIO = 120;
+const int CONTROL_INTERVAL_MS = 100;
 
-const int MOTOR_PWM_PINS[NUM_MOTORS] =     {7, 6, 8, 9}; // PWM pins
-const int MOTOR_DIR_A_PINS[NUM_MOTORS] = {35, 34, 38, 10}; //  Direction A pins
-const int MOTOR_DIR_B_PINS[NUM_MOTORS] = {33, 32, 39, 11}; //  Direction B pins
+// Motor pins
+const int MOTOR_PWM[NUM_MOTORS] = {7, 6, 9, 8};
+const int MOTOR_DIRA[NUM_MOTORS] = {35, 32, 11, 38};
+const int MOTOR_DIRB[NUM_MOTORS] = {33, 34, 10, 39};
 
-const int ENCODER_A_PINS[NUM_MOTORS] = {44, 27, 2, 5}; // Must be interrupt-capable
-const int ENCODER_B_PINS[NUM_MOTORS] = {45, 26, 3, 4};
+const int ENCODER_A[NUM_MOTORS] = {A0, 27, A2, 2};
+const int ENCODER_B[NUM_MOTORS] = {A1, 26, A3, 3};
 
-volatile long encoderPulses[NUM_MOTORS] = {0, 0, 0, 0};
+volatile long encoderPulses[NUM_MOTORS] = {0};
+double targetRPM[NUM_MOTORS] = {50, 50, 0, 0};
+double currentRPM[NUM_MOTORS] = {0};
+double outputPWM[NUM_MOTORS] = {0};
 
-double targetRPM[NUM_MOTORS] = {50, 50, 50, 50}; // Desired speed for each wheel
-double currentRPM[NUM_MOTORS] = {0, 0, 0, 0};
-double motorOutput[NUM_MOTORS] = {0, 0, 0, 0};
-
-double pidError[NUM_MOTORS] = {0, 0, 0, 0};
-double lastError[NUM_MOTORS] = {0, 0, 0, 0};
-double integral[NUM_MOTORS] = {0, 0, 0, 0};
-double derivative[NUM_MOTORS] = {0, 0, 0, 0};
+double pidError[NUM_MOTORS] = {0};
+double lastError[NUM_MOTORS] = {0};
+double integral[NUM_MOTORS] = {0};
+double derivative[NUM_MOTORS] = {0};
 
 unsigned long lastUpdateTime = 0;
 
-const double encoderPPR = 360.0; // pulses per revolution
-const double gearRatio = 1.0;    // adjust if needed
-
-
+// Encoder for motor 1
 void encoderISR0() {
-  if (digitalRead(ENCODER_B_PINS[0])) encoderPulses[0]++; else encoderPulses[0]--;
+  int A = digitalRead(ENCODER_A[0]);
+  int B = digitalRead(ENCODER_B[0]);
+  if (A == B) encoderPulses[0]--; else encoderPulses[0]++;
 }
+
+// Encoder for motor 2
 void encoderISR1() {
-  if (digitalRead(ENCODER_B_PINS[1])) encoderPulses[1]++; else encoderPulses[1]--;
+  int A = digitalRead(ENCODER_A[1]);
+  int B = digitalRead(ENCODER_B[1]);
+  if (A == B) encoderPulses[1]++; else encoderPulses[1]--;
 }
+
+// Encoder for motor 3
 void encoderISR2() {
-  if (digitalRead(ENCODER_B_PINS[2])) encoderPulses[2]++; else encoderPulses[2]--;
+  int A = digitalRead(ENCODER_A[2]);
+  int B = digitalRead(ENCODER_B[2]);
+  if (A == B) encoderPulses[2]--; else encoderPulses[2]++;
 }
+
+// Encoder for motor 4
 void encoderISR3() {
-  if (digitalRead(ENCODER_B_PINS[3])) encoderPulses[3]++; else encoderPulses[3]--;
+  int A = digitalRead(ENCODER_A[3]);
+  int B = digitalRead(ENCODER_B[3]);
+  if (A == B) encoderPulses[3]--; else encoderPulses[3]++;
 }
 
-void setup() {
-  Serial.begin(9600);
-  display.begin();
-  display.setRotation(1); // Set display orientation
-
-  for (int i = 0; i < NUM_MOTORS; i++) {
-    // Motor Pins
-    pinMode(MOTOR_PWM_PINS[i], OUTPUT);
-    pinMode(MOTOR_DIR_A_PINS[i], OUTPUT);
-    pinMode(MOTOR_DIR_B_PINS[i], OUTPUT);
-
-    // Encoder Pins
-    pinMode(ENCODER_A_PINS[i], INPUT_PULLUP);
-    pinMode(ENCODER_B_PINS[i], INPUT_PULLUP);
-  }
-
-  // Attach interrupts
-  attachInterrupt(digitalPinToInterrupt(ENCODER_A_PINS[0]), encoderISR0, RISING);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_A_PINS[1]), encoderISR1, RISING);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_A_PINS[2]), encoderISR2, RISING);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_A_PINS[3]), encoderISR3, RISING);
-
-  lastUpdateTime = millis();
-}
-
-void runPID() {
-  unsigned long currentTime = millis();
-  double dt = (currentTime - lastUpdateTime) / 1000.0; // seconds
-
-  if (dt >= 0.1) { // Run every 100 ms
-    for (int i = 0; i < NUM_MOTORS; i++) {
-
-      noInterrupts();
-      long pulses = encoderPulses[i];
-      encoderPulses[i] = 0;
-      interrupts();
-
-      currentRPM[i] = (pulses / encoderPPR) * 60.0 / dt / gearRatio;
-
-      // PID Calculations
-      pidError[i] = targetRPM[i] - currentRPM[i];
-      integral[i] += pidError[i] * dt;
-      derivative[i] = (pidError[i] - lastError[i]) / dt;
-      lastError[i] = pidError[i];
-
-      motorOutput[i] = Kp[i] * pidError[i] + Ki[i] * integral[i] + Kd[i] * derivative[i];
-
-      // Set Motor Speed and Direction
-      setMotorSpeed(i, motorOutput[i]);
-    }
-    
-    // Update timing
-    lastUpdateTime = currentTime;
-  }
-}
-
-void setMotorSpeed(int motorIndex, double output) {
-  // Set Motor Direction
-  if (output > 0) {
-    digitalWrite(MOTOR_DIR_A_PINS[motorIndex], LOW);
-    digitalWrite(MOTOR_DIR_B_PINS[motorIndex], HIGH);
-  } else if (output < 0) {
-    digitalWrite(MOTOR_DIR_A_PINS[motorIndex], HIGH);
-    digitalWrite(MOTOR_DIR_B_PINS[motorIndex], LOW);
-  } else {
-    digitalWrite(MOTOR_DIR_A_PINS[motorIndex], LOW);
-    digitalWrite(MOTOR_DIR_B_PINS[motorIndex], LOW);
-  }
-  // Apply PWM
-  analogWrite(MOTOR_PWM_PINS[motorIndex], constrain(abs(output), 0, 255));
-}
-
-
+// display on GIGA Shield
 void updateDisplay() {
-  display.fillScreen(0x0000); // Black background
-  display.setTextColor(0xFFFF); // White text
+  display.fillScreen(0x0000);
+  display.setTextColor(0xFFFF);
   display.setTextSize(2);
-  
-  // Header
+
   display.setCursor(10, 10);
   display.println("Motor | Target | Actual | PWM");
   display.drawLine(10, 35, 470, 35, 0xFFFF);
 
-  // Data for each motor
   for (int i = 0; i < NUM_MOTORS; i++) {
     int yPos = 50 + (i * 40);
     char buffer[50];
-    
-    // Format the string for display
-    sprintf(buffer, "  %d   | %-6.1f | %-6.1f | %-3d", 
-            i, 
-            targetRPM[i], 
-            currentRPM[i], 
-            (int)constrain(abs(motorOutput[i]), 0, 255));
-            
+    sprintf(buffer, "  %d   | %-6.1f | %-6.1f | %-3d",
+            i,
+            targetRPM[i],
+            currentRPM[i],
+            (int)constrain(abs(outputPWM[i]), 0, 255));
+
     display.setCursor(10, yPos);
     display.println(buffer);
   }
 }
 
+// PID Control
+void runPID() {
+  unsigned long now = millis();
+  double dt = (now - lastUpdateTime) / 1000.0;
+
+  if (dt >= (CONTROL_INTERVAL_MS / 1000.0)) {
+    for (int i = 0; i < NUM_MOTORS; i++) {
+      noInterrupts();
+      long pulses = encoderPulses[i];
+      encoderPulses[i] = 0;
+      interrupts();
+
+      // RPM calculation
+      double revolutions = (double)pulses / (ENCODER_PPR * GEAR_RATIO);
+      currentRPM[i] = (revolutions / dt) * 60.0;
+
+      // PID
+      pidError[i] = targetRPM[i] - currentRPM[i];
+      integral[i] += pidError[i] * dt;
+      derivative[i] = (pidError[i] - lastError[i]) / dt;
+      lastError[i] = pidError[i];
+
+      outputPWM[i] = Kp * pidError[i] + Ki * integral[i] + Kd * derivative[i];
+
+      // Motor control
+      if (outputPWM[i] > 0) {
+        digitalWrite(MOTOR_DIRA[i], LOW);
+        digitalWrite(MOTOR_DIRB[i], HIGH);
+      } else if (outputPWM[i] < 0) {
+        digitalWrite(MOTOR_DIRA[i], HIGH);
+        digitalWrite(MOTOR_DIRB[i], LOW);
+      } else {
+        digitalWrite(MOTOR_DIRA[i], LOW);
+        digitalWrite(MOTOR_DIRB[i], LOW);
+      }
+
+      analogWrite(MOTOR_PWM[i], constrain(abs(outputPWM[i]), 0, 255));
+    }
+
+    updateDisplay();
+    lastUpdateTime = now;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  display.begin();
+  display.setRotation(3);
+
+  for (int i = 0; i < NUM_MOTORS; i++) {
+    pinMode(MOTOR_PWM[i], OUTPUT);
+    pinMode(MOTOR_DIRA[i], OUTPUT);
+    pinMode(MOTOR_DIRB[i], OUTPUT);
+
+    pinMode(ENCODER_A[i], INPUT_PULLUP);
+    pinMode(ENCODER_B[i], INPUT_PULLUP);
+  }
+
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A[0]), encoderISR0, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A[1]), encoderISR1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A[2]), encoderISR2, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A[3]), encoderISR3, CHANGE);
+
+  lastUpdateTime = millis();
+}
+
 void loop() {
   runPID();
-
-  static unsigned long lastDisplayTime = 0;
-  if (millis() - lastDisplayTime > 250) { // Update display every 250ms
-    updateDisplay();
-    lastDisplayTime = millis();
-  }
 }
