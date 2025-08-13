@@ -1,22 +1,21 @@
-#include <Arduino_GigaDisplay_GFX.h>
+#include <Arduino_GigaDisplay_GFX.h> // Include the library for the display shield
 
-GigaDisplay_GFX display;
+GigaDisplay_GFX display; 
 
-const int Num_motors = 4;
+#define Num_motors 4
 
 // Motor driver pins
-const int MOTOR_PWM_PINS[Num_motors] = {7, 8, 9, 10};
-const int MOTOR_DIR_A_PINS[Num_motors] = {33, 34, 36, 37};
-const int MOTOR_DIR_B_PINS[Num_motors] = {35, 32, 38, 39};
+const int MOTOR_PWM_PINS[Num_motors] =  {7, 6, 9, 8};
+const int MOTOR_DIR_A_PINS[Num_motors] = {35, 32, 11, 38};
+const int MOTOR_DIR_B_PINS[Num_motors] = {33, 34, 10, 39};
 
 // Encoder pins
-const int encoderchannelA[Num_motors] = {44, 27, 2, 5};
-const int encoderchannelB[Num_motors] = {45, 26, 3, 4};
+const int encoderchannelA[Num_motors] = {A0, 27, A2, 2};
+const int encoderchannelB[Num_motors] = {A1, 26, A3, 3};
 
-// Encoder parameters
 const int ENCODER_PPR = 12; // pulses per rev
 const int Shaft_Gear_Ratio = 120; // gearbox ratio
-const float wheel_radius = 0.048; 
+const float wheel_radius = 0.048; // wheel radius in meters
 const float effectivePPR = ENCODER_PPR * Shaft_Gear_Ratio;
 
 // ENCODER VARIABLES 
@@ -25,7 +24,10 @@ long Last_Measured_Pulses[Num_motors] = {0, 0, 0, 0};
 float RPM[Num_motors] = {0, 0, 0, 0};
 
 // PID VARIABLES 
-double Kp = 0.2, Ki = 0.05, Kd = 0.01;
+const double Kp = .6;
+const double Ki = 0.2;
+const double Kd = 0;
+
 double targetRPM[Num_motors] = {0, 0, 0, 0};
 double pidError[Num_motors] = {0, 0, 0, 0};
 double lastError[Num_motors] = {0, 0, 0, 0};
@@ -40,26 +42,28 @@ const unsigned long PID_INTERVAL_MS = 100; // PID update every 100ms
 float x_ref = 1.0, y_ref = 0.5, theta_ref = 0.0; // desired pos in meters and radians
 float x_est = 0.0, y_est = 0.0, theta_est = 0.0; // estimated pos from BNO055-sensor
 
-float vx_cmd = 0.0, vy_cmd = 0.0, w_cmd = 0.0; // commanded body velocities
+float vx_cmd = 0.0, vy_cmd = 0.0, w_cmd = 0.0; // commanded car velocities to get to desired position
 
 // OUTER CONTROLLER 
 void outerController() {
+  
   // Position error
-  float ex = x_ref - x_est;
-  float ey = y_ref - y_est;
-  float eth = theta_ref - theta_est;
+  float ex = -(x_ref - x_est);
+  float ey = -(y_ref - y_est);
+  float eth = -(theta_ref - theta_est);
 
 // Overleaf COntroller
-  float Kp_outer = 1.0;
-  vx_cmd = Kp_outer * ex;
-  vy_cmd = Kp_outer * ey;
-  w_cmd  = Kp_outer * eth;
+  float Kp_x = 1.0, kp_y =1.0, kp_th=1.0; // this assumes diagonal K-Matrix. change to given K
+
+  vx_cmd = Kp_x * ex; 
+  vy_cmd = kp_y * ey;
+  w_cmd  = kp_th * eth;
 
   float L = 0.2; //
   float W = 0.2; //
   float R = wheel_radius;
 
- // Calculate angular velocities using mecanum inverse kinematics
+ // Calculate angular velocities/RPM using eq 5.1. These will be fed into the PID controller
   targetRPM[0] = ((vx_cmd - vy_cmd - (L+W)*w_cmd) / R) * 60.0 / (2*PI); // Front Left
   targetRPM[1] = ((vx_cmd + vy_cmd + (L+W)*w_cmd) / R) * 60.0 / (2*PI); // Front Right
   targetRPM[2] = ((vx_cmd + vy_cmd - (L+W)*w_cmd) / R) * 60.0 / (2*PI); // Rear Left
@@ -116,36 +120,32 @@ void setMotorSpeed(int motorIndex, double output) {
   analogWrite(MOTOR_PWM_PINS[motorIndex], constrain(abs(output), 0, 255));
 }
 
-//  ENCODER ISR FUNCTIONS 
-void readEncoderA(int idx) {
-  if (digitalRead(encoderchannelA[idx]) == HIGH) {
-    if (digitalRead(encoderchannelB[idx]) == LOW) encoder_pulses[idx]++;
-    else encoder_pulses[idx]--;
-  } else {
-    if (digitalRead(encoderchannelB[idx]) == HIGH) encoder_pulses[idx]++;
-    else encoder_pulses[idx]--;
-  }
+void encoderISR0() {
+  int A = digitalRead(encoderchannelA[0]);
+  int B = digitalRead(encoderchannelB[0]);
+  if (A == B) encoder_pulses[0]--; else encoder_pulses[0]++;
 }
 
-void readEncoderB(int idx) {
-  if (digitalRead(encoderchannelB[idx]) == HIGH) {
-    if (digitalRead(encoderchannelA[idx]) == HIGH) encoder_pulses[idx]++;
-    else encoder_pulses[idx]--;
-  } else {
-    if (digitalRead(encoderchannelA[idx]) == LOW) encoder_pulses[idx]++;
-    else encoder_pulses[idx]--;
-  }
+// Encoder for motor 2
+void encoderISR1() {
+  int A = digitalRead(encoderchannelA[1]);
+  int B = digitalRead(encoderchannelB[1]);
+  if (A == B) encoder_pulses[1]++; else encoder_pulses[1]--;
 }
 
-void callInterruptA0(){ readEncoderA(0); }
-void callInterruptB0(){ readEncoderB(0); }
-void callInterruptA1(){ readEncoderA(1); }
-void callInterruptB1(){ readEncoderB(1); }
-void callInterruptA2(){ readEncoderA(2); }
-void callInterruptB2(){ readEncoderB(2); }
-void callInterruptA3(){ readEncoderA(3); }
-void callInterruptB3(){ readEncoderB(3); }
+// Encoder for motor 3
+void encoderISR2() {
+  int A = digitalRead(encoderchannelA[2]);
+  int B = digitalRead(encoderchannelB[2]);
+  if (A == B) encoder_pulses[2]--; else encoder_pulses[2]++;
+}
 
+// Encoder for motor 4
+void encoderISR3() {
+  int A = digitalRead(encoderchannelA[3]);
+  int B = digitalRead(encoderchannelB[3]);
+  if (A == B) encoder_pulses[3]--; else encoder_pulses[3]++;
+}
 
 //  DISPLAY shield
 void updateDisplay() {
@@ -179,14 +179,10 @@ void setup() {
     pinMode(encoderchannelB[i], INPUT_PULLUP);
   }
 
-  attachInterrupt(digitalPinToInterrupt(encoderchannelA[0]), callInterruptA0, RISING);
-  attachInterrupt(digitalPinToInterrupt(encoderchannelB[0]), callInterruptB0, RISING);
-  attachInterrupt(digitalPinToInterrupt(encoderchannelA[1]), callInterruptA1, RISING);
-  attachInterrupt(digitalPinToInterrupt(encoderchannelB[1]), callInterruptB1, RISING);
-  attachInterrupt(digitalPinToInterrupt(encoderchannelA[2]), callInterruptA2, RISING);
-  attachInterrupt(digitalPinToInterrupt(encoderchannelB[2]), callInterruptB2, RISING);
-  attachInterrupt(digitalPinToInterrupt(encoderchannelA[3]), callInterruptA3, RISING);
-  attachInterrupt(digitalPinToInterrupt(encoderchannelB[3]), callInterruptB3, RISING);
+  attachInterrupt(digitalPinToInterrupt(encoderchannelA[0]), encoderISR0, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(encoderchannelA[1]), encoderISR1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(encoderchannelA[2]), encoderISR2, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(encoderchannelA[3]), encoderISR3, CHANGE);
 
   lastPIDTime = millis();
 }
