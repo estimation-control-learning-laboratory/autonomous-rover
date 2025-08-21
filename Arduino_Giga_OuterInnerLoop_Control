@@ -1,0 +1,604 @@
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
+
+#include <Arduino_GigaDisplay.h>
+#include <Arduino_GigaDisplay_GFX.h>
+#define BLACK 0x0000
+#define WHITE 0xFFFF
+
+#include "src/MotorData.h"
+
+#include <TinyGPS.h>
+
+#include <ArduinoEigenDense.h>
+
+
+// Create a sensor object, using I2C address 0x28
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);
+
+//  Establish time interval for reading information from sensors and gps
+unsigned long lastReadTime{ 0 };
+const unsigned int readInterval{ 100 };
+
+// Establish time interval for updating display
+unsigned long prevUpdateTime{ 0 };
+const unsigned int updateInterval{ 200 };
+
+GigaDisplay_GFX display;  //create object to be displayed
+
+//Create GPS object
+TinyGPS myGPS;
+
+//Insert comment here
+float latitude{ 0.0 };
+float longitude{ 0.0 };
+unsigned long age{ 0 };
+
+//Establish 8signed integers for the 4 given parameters to calibrate the sensor
+uint8_t systemCal{ 0 }, gyroCal{ 0 }, accelCal{ 0 }, magCal{ 0 };
+
+// Initialize vectors acceleraton, gyroscope, and magnetometer to be read by bno055 sensor
+imu::Vector<3> acc;
+imu::Vector<3> euler;
+imu::Vector<3> mag;
+imu::Vector<3> gyro;
+
+//Interval
+const unsigned int encoderInterval{ 200 };  //interval for updating encoders set to 20 ms
+
+volatile long encoder_pulse{ 0 };
+unsigned long prevEncoderTime{ 0 };
+const int Num_motors{ 4 };
+float RPM[Num_motors];
+float distance[Num_motors];
+long Last_Measured_Pulses[Num_motors];
+long currentPulse[Num_motors];
+;
+
+// Encoder Channel Pins
+// const int encoderchannelA[Num_motors] = { 2, 4, 6, 8 }; // Motor A pins
+// const int encoderchannelB[Num_motors] = { 3, 5, 7, 9 }; // Motor B pins
+const int encoderchannelA[Num_motors] = { 44, 26, 3, 4 };  //encoder pin A, must be interrupt capable
+const int encoderchannelB[Num_motors] = { 45, 27, 2, 5 };  //encoder pin B, must be interrupt capable
+
+// Store the number of pulses per time interval
+volatile long encoder_pulses[Num_motors];
+
+
+// Hardware Constants
+const int ENCODER_PPR{ 12 };  // Encoder pulses per 360 degrees
+const int Shaft_Gear_Ratio{ 120 };
+const int wheel_Radius = { 48 };  // mm
+
+//Controller
+const int GEAR_RATIO = 120;
+const int CONTROL_INTERVAL_MS = 20;
+
+// Front Left Wheel
+const int FrontLeftPin1{ 32 };     // Direction Pin 1
+const int FrontLeftPin2{ 34 };     // Direction Pin 2
+const int FrontLeftSpeedPin{ 6 };  // PWM Speed Pin
+// Front Right Wheel
+const int FrontRightPin1{ 33 };
+const int FrontRightPin2{ 35 };
+const int FrontRightSpeedPin{ 7 };
+// Back Right Wheel
+const int BackRightPin1{ 10 };
+const int BackRightPin2{ 11 };
+const int BackRightSpeedPin{ 9 };
+// Back Left Wheel
+const int BackLeftPin1{ 39 };
+const int BackLeftPin2{ 38 };
+const int BackLeftSpeedPin{ 8 };
+
+MotorDataPacket motorCommands;
+
+using namespace Eigen;
+
+MatrixXd K(4, 3);
+MatrixXd B(3, 4);
+Vector4d wheelVel;
+Vector3d linVelo;
+Vector4d omega;
+
+const int circRate {.01}; //Speed to traverse the circle in rad/s
+
+const double Kp = .6;
+const double Ki = 0.2;
+const double Kd = 0;
+
+
+// Motor pins
+const int MOTOR_PWM[4] = {7, 6, 9, 8};
+const int MOTOR_DIRA[4] = {35, 32, 11, 38};
+const int MOTOR_DIRB[4] = {33, 34, 10, 39};
+
+const int ENCODER_A[4] = {A0, 27, A2, 2};
+const int ENCODER_B[4] = {A1, 26, A3, 3};
+
+volatile long encoderPulses[4] = {0};
+double currentRPM[4] = {0};
+double outputPWM[4] = {0};
+
+double pidError[4] = {0};
+double lastError[4] = {0};
+double integral[4] = {0};
+double derivative[4] = {0};
+
+
+float speed[4] {}; // array holding the speed required to match the reference
+
+unsigned long outerLoop {30};
+unsigned long lastOuter {0};
+unsigned long innerLoop {10};
+unsigned long lastInner {0};
+
+unsigned long lastUpdateTime {millis()};
+unsigned long prevTime {millis()};
+unsigned long startTime {millis()};
+
+float theta {};
+
+bool isCalibrated {false};
+
+float r_ddot1 {};
+float r_ddot2 {};
+
+float r_dot1 {};
+float r_dot2 {};
+
+float prev_rdot1 {0};
+float prev_rdot2 {0};
+
+float r1 {};
+float r2 {};
+
+float prev_r1 {-1};
+float prev_r2 {0};
+
+float theta_old {PI/2};
+
+// These Funtions Record the Encoder pulses as we as the direction based on channel A&B
+// Encoder for motor 1
+void encoderISR0() {
+  int A = digitalRead(ENCODER_A[0]);
+  int B = digitalRead(ENCODER_B[0]);
+  if (A == B) encoderPulses[0]--; else encoderPulses[0]++;
+}
+
+// Encoder for motor 2
+void encoderISR1() {
+  int A = digitalRead(ENCODER_A[1]);
+  int B = digitalRead(ENCODER_B[1]);
+  if (A == B) encoderPulses[1]++; else encoderPulses[1]--;
+}
+
+// Encoder for motor 3
+void encoderISR2() {
+  int A = digitalRead(ENCODER_A[2]);
+  int B = digitalRead(ENCODER_B[2]);
+  if (A == B) encoderPulses[2]--; else encoderPulses[2]++;
+}
+
+// Encoder for motor 4
+void encoderISR3() {
+  int A = digitalRead(ENCODER_A[3]);
+  int B = digitalRead(ENCODER_B[3]);
+  if (A == B) encoderPulses[3]--; else encoderPulses[3]++;
+}
+
+
+void setup(void) 
+{
+  Serial.begin(115200);
+  Serial1.begin(9600);
+  Wire.begin();
+
+  // Set to NDOF fusion mode
+  bno.begin();
+  bno.setMode(OPERATION_MODE_NDOF);
+
+  display.begin();
+  display.fillScreen(BLACK);
+  display.setRotation(1);
+  display.setTextSize(3);
+  display.setTextColor(WHITE, BLACK);
+
+ /* 
+  // --- Initialize Motor Pins ---
+  pinMode(FrontLeftPin1, OUTPUT);
+  pinMode(FrontLeftPin2, OUTPUT);
+  pinMode(FrontLeftSpeedPin, OUTPUT);
+  pinMode(FrontRightPin1, OUTPUT);
+  pinMode(FrontRightPin2, OUTPUT);
+  pinMode(FrontRightSpeedPin, OUTPUT);
+  pinMode(BackRightPin1, OUTPUT);
+  pinMode(BackRightPin2, OUTPUT);
+  pinMode(BackRightSpeedPin, OUTPUT);
+  pinMode(BackLeftPin1, OUTPUT);
+  pinMode(BackLeftPin2, OUTPUT);
+  pinMode(BackLeftSpeedPin, OUTPUT);
+  */
+
+
+ for (int i = 0; i < 4; i++) 
+ {
+    
+    pinMode(MOTOR_PWM[i], OUTPUT);
+    pinMode(MOTOR_DIRA[i], OUTPUT);
+    pinMode(MOTOR_DIRB[i], OUTPUT);
+    
+    pinMode(ENCODER_A[i], INPUT_PULLUP);
+    pinMode(ENCODER_B[i], INPUT_PULLUP);
+ }
+
+ for (int i = 0; i < 4; i++) 
+ {
+    
+    analogWrite(MOTOR_PWM[i], 0);
+    digitalWrite(MOTOR_DIRA[i], LOW);
+    digitalWrite(MOTOR_DIRB[i], LOW);
+    
+ }
+
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A[0]), encoderISR0, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A[1]), encoderISR1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A[2]), encoderISR2, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A[3]), encoderISR3, CHANGE);
+
+  
+  K(0, 0) = -50.0; //multiplied by 30 for greater gain as K was too weak
+  K(0, 1) = 50.0;
+  K(0, 2) = 12.5;
+
+  K(1, 0) = -50.0;
+  K(1, 1) = -50.0;
+  K(1, 2) = -12.5;
+
+  K(2, 0) = -50.0;
+  K(2, 1) = -50.0;
+  K(2, 2) = 12.5;
+  
+  K(3, 0) = -50.0;
+  K(3, 1) = 50.0;
+  K(3, 2) = -12.5;
+
+  B(0, 0) = 0.0150; 
+  B(0, 1) = 0.0150;
+  B(0, 2) = 0.0150;
+  B(0, 3) = 0.0150;
+
+  B(1, 0) = -0.0150;
+  B(1, 1) = 0.0150;
+  B(1, 2) = 0.0150;
+  B(1, 3) = -0.0150;
+
+  B(2, 0) = -0.0600;
+  B(2, 1) = 0.0600;
+  B(2, 2) = -0.0600;
+  B(2, 3) = 0.0600;
+
+
+
+}
+
+void updateDisplay() 
+{
+
+
+  display.setCursor(0, 0);
+  display.print("Calibration: ");
+  display.print(systemCal);
+  display.print(gyroCal);
+  display.print(accelCal);
+  display.print(magCal);
+
+
+  // --- Display Accelerometer Data ---
+  display.setCursor(0, 30);
+  display.print("Acc X: ");
+  display.print(acc.x());
+  display.print("   ");
+
+  display.setCursor(0, 60);
+  display.print("Acc Y: ");
+  display.print(acc.y());
+  display.print("   ");
+
+  display.setCursor(0, 90);
+  display.print("Acc Z: ");
+  display.print(acc.z());
+  display.print("   ");
+
+  display.setCursor(0, 120);
+  display.print("Roll: ");
+  display.print(euler.z());
+  display.print("   ");
+
+  display.setCursor(0, 150);
+  display.print("Pitch: ");
+  display.print(euler.y());
+  display.print("   ");
+
+  display.setCursor(0, 180);
+  display.print("Yaw: ");
+  display.print(euler.x());
+  display.print("   ");
+
+  display.setCursor(0, 210);
+  display.print("Angular Velocity X: ");
+  display.print(gyro.x());
+  display.print("   ");
+
+  display.setCursor(0, 240);
+  display.print("Angular Velocity Y: ");
+  display.print(gyro.y());
+  display.print("   ");
+
+  display.setCursor(0, 270);
+  display.print("Angular Velocity Z: ");
+  display.print(gyro.z() * -1);
+  display.print("   ");
+
+  display.setCursor(0, 300);
+  display.print("Latitude: ");
+  display.print(latitude == TinyGPS::GPS_INVALID_F_ANGLE ? 0.0 : latitude, 4);  //
+  display.print("   ");
+
+  display.setCursor(0, 330);
+  display.print("Longitude: ");
+  display.print(longitude == TinyGPS::GPS_INVALID_F_ANGLE ? 0.0 : longitude, 4);
+  display.print("   ");
+
+  display.setCursor(300, 60);
+  display.print("Motor");
+  display.setCursor(420, 60);
+  display.print("Omega");
+  display.setCursor(540, 60);
+  display.print("Distance (m)");
+
+  /*for (int i = 0; i < Num_motors; i++) 
+  {
+    int y_pos = 90 + (i * 30);  // Calculate Y position for each motor row
+
+    // Motor Number
+    display.setCursor(300, y_pos);
+    display.print(i + 1);
+
+    // RPM
+    display.setCursor(420, y_pos);
+    display.print(omega[i], 2);  // Print float with 2 decimal places
+
+    // Distance
+    display.setCursor(540, y_pos);
+    display.print(distance[i], 3);  // Print float with 3 decimal places
+  }
+  */
+}
+
+/*void calculations() 
+{
+
+  long currentPulses[Num_motors];
+
+  noInterrupts();
+  for (int i = 0; i < Num_motors; i++) 
+  {
+    currentPulses[i] = encoder_pulses[i];
+  }
+  interrupts();
+  for (int i = 0; i < Num_motors; i++) 
+  {
+    long interval_pulses = currentPulses[i] - Last_Measured_Pulses[i];  // calculate pulses over the interval
+    float revolutions = (float)interval_pulses / (ENCODER_PPR * Shaft_Gear_Ratio);
+    float rpm_float = (revolutions / encoderInterval) * 60000.0;  // (rev/ms) * (60000 ms/min)
+    RPM[i] = rpm_float;
+    omega[i] = RPM[i] * PI/30;
+
+    // Calculate total distance traveled in meters
+    float totalRevolutions = (float)currentPulses[i] / (ENCODER_PPR * Shaft_Gear_Ratio);
+    float distance_mm = totalRevolutions * wheel_Radius * 2 * PI;
+    distance[i] = distance_mm / 1000.0;          // Convert to meters
+    Last_Measured_Pulses[i] = currentPulses[i];  // update Last_Measured_Pulses with cuurrentPulse
+  }
+}
+*/
+
+/*void setMotorSpeed(int pin1, int pin2, int speedPin, int speed) // motor speed function for manual control
+{
+  if (speed == 0) 
+  {
+    digitalWrite(pin1, LOW);
+    digitalWrite(pin2, LOW);
+    analogWrite(speedPin, 0);
+  } 
+  else if (speed > 0) 
+  {  // Forward
+    digitalWrite(pin1, HIGH);
+    digitalWrite(pin2, LOW);
+    analogWrite(speedPin, constrain(speed, 0, 255));
+  } 
+  else 
+  {  // Backward (speed < 0)
+    digitalWrite(pin1, LOW);
+    digitalWrite(pin2, HIGH);
+    analogWrite(speedPin, constrain(abs(speed), 0, 255));
+  }
+}
+*/
+
+
+
+void controller()
+{
+
+  unsigned long currentTime = millis();
+  double t = (currentTime - startTime) / 1000.0;
+  double dt = (currentTime - prevTime) / 1000.0;
+
+  acc = bno.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
+  gyro = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+  theta = (theta_old) + ((-gyro.z()) * dt); //positive yaw rate defined as clockwise on BNO
+                                         
+
+
+
+  r_ddot1 = (-acc.x() * cos(theta)) + (acc.y() * sin(theta)); //derived for positive clockwise rotation
+  r_ddot2 = (acc.x() * sin(theta)) + (acc.y() * cos(theta));
+
+  r_dot1 = prev_rdot1 + (r_ddot1 * dt);
+  r_dot2 = prev_rdot2 + (r_ddot2 * dt);
+
+  r1 = prev_r1 + (r_dot1 * dt);
+  r2 = prev_r2 + (r_dot2 * dt);
+  Serial.print(r1);
+  Serial.print("   ");
+  Serial.print(r2);
+  Serial.print("   ");
+  Serial.println(theta);
+
+  Vector3d xi; 
+  xi << r1, r2, theta;
+  Vector3d xi_ref; 
+  xi_ref << -cos(circRate*t), sin(circRate*t), (-(circRate * t) + (PI / 2));
+  wheelVel = K * (xi - xi_ref);
+
+  speed[0] = wheelVel(1);
+  speed[1] = wheelVel(0);
+  speed[2] = wheelVel(2);
+  speed[3] = wheelVel(3); 
+
+  prevTime = currentTime;
+
+  prev_rdot1 = r_dot1;
+  prev_rdot2 = r_dot2;
+
+  prev_r1 = r1;
+  prev_r2 = r2;
+
+  theta_old = theta;
+}
+
+// PID Control
+void runPID() 
+{
+  unsigned long now = millis();
+  double dt = (now - lastUpdateTime) / 1000.0;
+
+  if (dt >= (CONTROL_INTERVAL_MS / 1000.0)) {
+    for (int i = 0; i < 4; i++) {
+      noInterrupts();
+      long pulses = encoderPulses[i];
+      encoderPulses[i] = 0;
+      interrupts();
+
+      // RPM calculation
+      double revolutions = (double)pulses / (ENCODER_PPR * GEAR_RATIO);
+      currentRPM[i] = (revolutions / dt) * 60.0;
+      omega[i] = currentRPM[i] * (PI / 30);
+    
+      // PID
+      pidError[i] = speed[i] - omega[i];
+      integral[i] += pidError[i] * dt;
+      derivative[i] = (pidError[i] - lastError[i]) / dt;
+      lastError[i] = pidError[i];
+
+      outputPWM[i] = Kp * pidError[i] + Ki * integral[i] + Kd * derivative[i];
+
+      // Motor control
+      if (outputPWM[i] > 0) 
+      {
+        digitalWrite(MOTOR_DIRA[i], LOW);
+        digitalWrite(MOTOR_DIRB[i], HIGH);
+      } 
+      else if (outputPWM[i] < 0) {
+        digitalWrite(MOTOR_DIRA[i], HIGH);
+        digitalWrite(MOTOR_DIRB[i], LOW);
+      } 
+      else 
+      {
+        digitalWrite(MOTOR_DIRA[i], LOW);
+        digitalWrite(MOTOR_DIRB[i], LOW);
+      }
+
+      if (outputPWM[i] != 0)
+      {
+        analogWrite(MOTOR_PWM[i], constrain(abs(outputPWM[i]), 40, 255));
+      }
+      else
+      {
+        analogWrite(MOTOR_PWM[i], 0);
+      }
+      
+    }
+
+    //updateDisplay();
+    lastUpdateTime = now;
+  }
+}
+
+
+void loop(void) 
+{
+
+    lastReadTime = millis();
+
+    // Pulling x,y,z values for linear acceleration, gyroscope (yaw, pitch, roll) and magnetometer
+
+  unsigned long currentTime {millis()};
+
+  if (!isCalibrated)
+  {
+
+    //Allocate active memory for each calibration variable as these will be constantly changing to begin starting the robot
+    bno.getCalibration(&systemCal, &gyroCal, &accelCal, &magCal);
+
+    if (gyroCal == 3)
+    {
+      isCalibrated = true;
+    }
+  }
+  else
+  {
+    if (currentTime - lastOuter >= outerLoop)
+    {
+      lastOuter = currentTime;
+      controller();
+    }
+    runPID();
+  }
+
+     while (Serial1.available()) 
+    {
+      if (myGPS.encode(Serial1.read())) 
+      {
+        myGPS.f_get_position(&latitude, &longitude, &age);
+      }
+    }
+
+  /*if (Wire.requestFrom(8, sizeof(MotorDataPacket)) == sizeof(MotorDataPacket)) 
+  {
+
+    Wire.readBytes((byte*)&motorCommands, sizeof(MotorDataPacket));
+
+    setMotorSpeed(FrontLeftPin1, FrontLeftPin2, FrontLeftSpeedPin, motorCommands.fl);
+    setMotorSpeed(FrontRightPin1, FrontRightPin2, FrontRightSpeedPin, motorCommands.fr);
+    setMotorSpeed(BackLeftPin1, BackLeftPin2, BackLeftSpeedPin, motorCommands.bl);
+    setMotorSpeed(BackRightPin1, BackRightPin2, BackRightSpeedPin, motorCommands.br); 
+  }
+
+
+  if (millis() - prevEncoderTime >= encoderInterval) 
+  {
+    prevEncoderTime = millis();
+    calculations();
+  }*/
+
+  if (millis() - prevUpdateTime >= updateInterval) 
+  {
+
+    prevUpdateTime = millis();
+    updateDisplay();
+  }}
