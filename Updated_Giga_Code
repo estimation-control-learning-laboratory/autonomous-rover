@@ -1,0 +1,795 @@
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
+#include <Arduino_GigaDisplay.h>
+#include <Arduino_GigaDisplay_GFX.h>
+#include <cmath>
+#define BLACK 0x0000
+#define WHITE 0xFFFF
+//#include "src/MotorData.h"
+#include <TinyGPS++.h>
+#include <ArduinoEigenDense.h>
+
+#define GPS_SERIAL Serial1
+
+TinyGPSPlus gps;  // GPS object
+static const uint32_t GPSBaud = 9600;
+
+const double WGS84_a = 6378137.0;           // Semi-major axis
+const double WGS84_ecc = 6.69437999014e-3;  // First eccentricity squared
+//
+struct ECEF 
+{
+  double x, y, z;
+};
+
+struct NED 
+{
+  double n;  // North
+  double e;  // East
+  double d;  // Down
+};
+NED ned_position;  //
+
+// first GPS reading
+bool origin_is_set = false;
+ECEF ecef_origin;
+ECEF ecef_current;
+double lat_origin_rad = 0.0;
+double lon_origin_rad = 0.0;
+double alt_origin = 0.0;
+double corrected_East_Pos;
+double corrected_North_Pos;
+
+NED currentNedPosition;
+bool gpsHasNewData = false;  // A flag to signal the controller
+
+// Create a sensor object, using I2C address 0x28
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);
+
+//  Establish time interval for reading information from sensors and gps
+unsigned long lastReadTime{ 0 };
+const unsigned int readInterval{ 100 };
+
+// BNO calibration & data filtering constant
+const int CALIBRATION_SAMPLES = 1000;
+const int GPS_CAL_SAMPLES = 50; // less since the GPS takes ~one sec to get a new reading
+const double DEG_2_RAD = M_PI / 180.0;
+
+// Bias and variance variables
+double bias_ax = 0;  // 
+double bias_ay = 0;   // 
+double bias_omega = 0;
+double mean_theta = 0.0;
+double bias_North_Pos = 0.0;
+double bias_East_Pos = 0.0;
+double variance_north = 0.0;
+double variance_east = 0.0;
+double variance_theta = 0.0;
+double  variance_ax = 0;
+double  variance_ay = 0;
+double  variance_omega = 0;
+
+// Filtering parameters
+const float alpha = 0.2;
+float filtered_ax = 0.0;
+float filtered_ay = 0.0;
+
+// Establish time interval for updating display
+unsigned long prevUpdateTime{ 0 };
+const unsigned int updateInterval{ 200 };
+
+GigaDisplay_GFX display;  //create object to be displayed
+
+//Insert comment here
+float latitude{ 0.0 };
+float longitude{ 0.0 };
+unsigned long age{ 0 };
+
+//Establish 8signed integers for the 4 given parameters to calibrate the sensor
+uint8_t systemCal{ 0 }, gyroCal{ 0 }, accelCal{ 0 }, magCal{ 0 };
+
+// Initialize vectors acceleraton, gyroscope, and magnetometer to be read by bno055 sensor
+imu::Vector<3> acc;
+imu::Vector<3> euler;
+imu::Vector<3> mag;
+imu::Vector<3> gyro;
+
+//Interval
+const unsigned int encoderInterval{ 200 };  //interval for updating encoders set to 20 ms
+
+volatile long encoder_pulse{ 0 };
+unsigned long prevEncoderTime{ 0 };
+const int Num_motors{ 4 };
+float RPM[Num_motors];
+float distance[Num_motors];
+long Last_Measured_Pulses[Num_motors];
+long currentPulse[Num_motors];
+
+// Encoder Channel Pins
+const int encoderchannelA[Num_motors] = { 44, 26, 3, 4 };  //encoder pin A, must be interrupt capable
+const int encoderchannelB[Num_motors] = { 45, 27, 2, 5 };  //encoder pin B, must be interrupt capable
+
+// Store the number of pulses per time interval
+volatile long encoder_pulses[Num_motors];
+
+// Hardware Constants
+const int ENCODER_PPR{ 12 };  // Encoder pulses per 360 degrees
+const int Shaft_Gear_Ratio{ 120 };
+const int wheel_Radius = { 48 };  // mm
+
+//Controller
+const int GEAR_RATIO = 120;
+const int CONTROL_INTERVAL_MS = 20;
+
+// Front Left Wheel
+const int FrontLeftPin1{ 32 };     // Direction Pin 1
+const int FrontLeftPin2{ 34 };     // Direction Pin 2
+const int FrontLeftSpeedPin{ 6 };  // PWM Speed Pin
+// Front Right Wheel
+const int FrontRightPin1{ 33 };
+const int FrontRightPin2{ 35 };
+const int FrontRightSpeedPin{ 7 };
+// Back Right Wheel
+const int BackRightPin1{ 10 };
+const int BackRightPin2{ 11 };
+const int BackRightSpeedPin{ 9 };
+// Back Left Wheel
+const int BackLeftPin1{ 39 };
+const int BackLeftPin2{ 38 };
+const int BackLeftSpeedPin{ 8 };
+
+//MotorDataPacket motorCommands;
+using namespace Eigen;
+
+MatrixXd K(4, 3);
+MatrixXd B(3, 4);
+MatrixXd A(5, 5);
+MatrixXd B_state(5, 3);
+MatrixXd Ad(5, 5);
+MatrixXd Bd(5, 3);
+MatrixXd I(5, 5);
+MatrixXd C(3, 5);
+MatrixXd P_k(5, 5);
+MatrixXd Q(5, 5);
+MatrixXd R(3, 3);
+MatrixXd P_k1(5, 5);
+MatrixXd P_k1_k1(5, 5);
+MatrixXd R_bar(3, 3);
+MatrixXd K_est(5, 3);
+MatrixXd P(5, 5);
+Vector4d wheelVel;
+Vector3d linVelo;
+Vector4d omega;
+MatrixXd x(5, 1);
+MatrixXd x_est(5, 1);
+Vector3d y;
+
+
+const int circRate{ .01 };  //Speed to traverse the circle in rad/s
+
+const double Kp = .6;
+const double Ki = 0.2;
+const double Kd = 0;
+
+
+// Motor pins
+const int MOTOR_PWM[4] = { 7, 6, 9, 8 };
+const int MOTOR_DIRA[4] = { 35, 32, 11, 38 };
+const int MOTOR_DIRB[4] = { 33, 34, 10, 39 };
+
+const int ENCODER_A[4] = { A0, 27, A2, 2 };
+const int ENCODER_B[4] = { A1, 26, A3, 3 };
+
+volatile long encoderPulses[4] = { 0 };
+double currentRPM[4] = { 0 };
+double outputPWM[4] = { 0 };
+
+double pidError[4] = { 0 };
+double lastError[4] = { 0 };
+double integral[4] = { 0 };
+double derivative[4] = { 0 };
+
+
+float speed[4]{};  // array holding the speed required to match the reference
+
+unsigned long outerLoop{ 30 };
+unsigned long lastOuter{ 0 };
+unsigned long innerLoop{ 10 };
+unsigned long lastInner{ 0 };
+
+unsigned long lastUpdateTime{ millis() };
+unsigned long prevTime{ millis() };
+unsigned long startTime{ millis() };
+
+bool isCalibrated{ false };
+
+float r_ddot1{};
+float r_ddot2{};
+
+float r_dot1{};
+float r_dot2{};
+
+float prev_rdot1{ 0 };
+float prev_rdot2{ 0 };
+
+float r1{};
+float r2{};
+
+float prev_r1{ -1 };
+float prev_r2{ 0 };
+
+float theta_old{ PI / 2 };
+
+// These Funtions Record the Encoder pulses as we as the direction based on channel A&B
+// Encoder for motor 1
+void encoderISR0() 
+{
+  int A = digitalRead(ENCODER_A[0]);
+  int B = digitalRead(ENCODER_B[0]);
+  if (A == B) encoderPulses[0]--;
+  else encoderPulses[0]++;
+}
+
+// Encoder for motor 2
+void encoderISR1() 
+{
+  int A = digitalRead(ENCODER_A[1]);
+  int B = digitalRead(ENCODER_B[1]);
+  if (A == B) encoderPulses[1]++;
+  else encoderPulses[1]--;
+}
+
+// Encoder for motor 3
+void encoderISR2() 
+{
+  int A = digitalRead(ENCODER_A[2]);
+  int B = digitalRead(ENCODER_B[2]);
+  if (A == B) encoderPulses[2]--;
+  else encoderPulses[2]++;
+}
+
+// Encoder for motor 4
+void encoderISR3() 
+{
+  int A = digitalRead(ENCODER_A[3]);
+  int B = digitalRead(ENCODER_B[3]);
+  if (A == B) encoderPulses[3]--;
+  else encoderPulses[3]++;
+}
+
+//***************************************************************************************************************************************************************************************
+ //This uses data from the IMU rather than encoders to calculate position
+void controller()
+{
+
+  unsigned long currentTime = millis();
+  double t = (currentTime - startTime) / 1000.0;
+  double dt = 1;
+
+  acc = bno.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
+  gyro = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+  euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+
+  Vector3d u;
+
+  float corrected_ax = acc.x() - bias_ax;
+  float corrected_ay = acc.y() - bias_ay;
+  float corrected_gyro = -gyro.z() - bias_omega;
+
+  r_ddot1 = (-corrected_ax * cos(euler.x() * PI / 180)) + (corrected_ay * sin(euler.x() * PI / 180)); //derived for positive clockwise rotation
+  r_ddot2 = (corrected_ax * sin(euler.x() * PI / 180)) + (corrected_ay * cos(euler.x() * PI / 180));
+
+  Ad = I + (A * dt);
+  Bd = B_state * dt;
+
+  u << r_ddot1, r_ddot2, corrected_gyro;
+
+  x = (Ad * x_est) + (Bd * u);
+
+  //solve and find K-k+1 for the time estimation step
+  P_k1 = (Ad * P_k * Ad.transpose()) + Q;
+  R_bar = C * P_k1 * C.transpose() + R;
+  P_k1_k1 = P_k1 - (P_k1 * C.transpose() * R_bar.inverse() * C * P_k1); //used as P_k in the next step
+  K_est = P_k1 * C.transpose() * R.inverse();
+
+  update_GPS();  // Call the GPS function
+  y << corrected_North_Pos, corrected_East_Pos, euler.x() * PI / 180; //double check to make sure that angle is correct for positive rotation about the z axis
+                                                           //remember to remove bias from the theta
+  x_est = x + K_est * (y - (C * x));
+
+  Vector3d xi; 
+  xi << x_est(0), x_est(2), x_est(4);
+  Vector3d xi_ref; 
+  xi_ref << -cos(circRate*t), sin(circRate*t), (-(circRate * t) + (PI / 2));
+  wheelVel = K * (xi - xi_ref);
+
+  speed[0] = wheelVel(1);
+  speed[1] = wheelVel(0);
+  speed[2] = wheelVel(2);
+  speed[3] = wheelVel(3); 
+
+  prevTime = currentTime;
+
+  P_k = P_k1_k1;
+}
+
+// PID Control
+void runPID() {
+  unsigned long now = millis();
+  double dt = (now - lastUpdateTime) / 1000.0;
+
+  if (dt >= (CONTROL_INTERVAL_MS / 1000.0)) {
+    for (int i = 0; i < 4; i++) {
+      noInterrupts();
+      long pulses = encoderPulses[i];
+      encoderPulses[i] = 0;
+      interrupts();
+
+      // RPM calculation
+      double revolutions = (double)pulses / (ENCODER_PPR * GEAR_RATIO);
+      currentRPM[i] = (revolutions / dt) * 60.0;
+      omega[i] = currentRPM[i] * (PI / 30);
+
+      // PID
+      pidError[i] = speed[i] - omega[i];
+      integral[i] += pidError[i] * dt;
+      derivative[i] = (pidError[i] - lastError[i]) / dt;
+      lastError[i] = pidError[i];
+
+      outputPWM[i] = Kp * pidError[i] + Ki * integral[i] + Kd * derivative[i];
+
+      // Motor control
+      if (outputPWM[i] > 0) {
+        digitalWrite(MOTOR_DIRA[i], LOW);
+        digitalWrite(MOTOR_DIRB[i], HIGH);
+      } else if (outputPWM[i] < 0) {
+        digitalWrite(MOTOR_DIRA[i], HIGH);
+        digitalWrite(MOTOR_DIRB[i], LOW);
+      } else {
+        digitalWrite(MOTOR_DIRA[i], LOW);
+        digitalWrite(MOTOR_DIRB[i], LOW);
+      }
+
+      if (outputPWM[i] != 0) {
+        analogWrite(MOTOR_PWM[i], constrain(abs(outputPWM[i]), 40, 255));
+      } else {
+        analogWrite(MOTOR_PWM[i], 0);
+      }
+    }
+    lastUpdateTime = now;
+  }
+}
+
+//**************************************************************************************
+
+void update_GPS() {
+  // if loop is better than while for non-blocking other tasks in the main loop function
+  if (GPS_SERIAL.available() > 0) {
+    if (gps.encode(GPS_SERIAL.read())) {
+      // Check for a valid and updated GPS fix BEFORE doing anything else
+      if (gps.location.isUpdated() && gps.location.isValid()) {
+
+        double lat_deg = gps.location.lat();
+        double lon_deg = gps.location.lng();
+        double alt = gps.altitude.meters();  // It's better to use actual altitude
+
+        Serial.print("Lat: ");
+        Serial.println(lat_deg, 6);
+        Serial.print("Lon: ");
+        Serial.println(lon_deg, 6);
+        Serial.println();
+
+        // Convert degrees from GPS library to radians
+        double lat_rad = lat_deg * (M_PI / 180.0);
+        double lon_rad = lon_deg * (M_PI / 180.0);
+
+        // Convert current lat/lon to ECEF
+        ECEF ecef_current = lon_lat_ToEcef(lat_rad, lon_rad, alt);
+
+        // Check is origin has been set
+        if (origin_is_set) {
+          ned_position = ecef_ToNed(ecef_current, ecef_origin, lat_origin_rad, lon_origin_rad);
+          corrected_East_Pos = ned_position.e - bias_East_Pos;
+          corrected_North_Pos = ned_position.n - bias_North_Pos;
+
+          Serial.print("Corrected Position (meters): North=");
+          Serial.println(corrected_East_Pos, 2);
+          Serial.print(", East=");
+          Serial.println(corrected_North_Pos, 2);
+        }
+      }  // Closes gps.location.isValid()
+    }    // Closes gps.encode()
+  }      // Closes GPS_SERIAL.available()
+}
+
+ECEF lon_lat_ToEcef(double lat_rad, double lon_rad, double alt) 
+{
+  ECEF ecef;
+  double N = WGS84_a / sqrt(1.0 - WGS84_ecc * sin(lat_rad) * sin(lat_rad));
+  ecef.x = (N + alt) * cos(lat_rad) * cos(lon_rad);
+  ecef.y = (N + alt) * cos(lat_rad) * sin(lon_rad);
+  ecef.z = ((1.0 - WGS84_ecc) * N + alt) * sin(lat_rad);
+  return ecef;
+}
+
+NED ecef_ToNed(const ECEF& ecef_current, const ECEF& ecef_origin, double lat_origin_rad, double lon_origin_rad) 
+{
+
+  // Calculate delta_r_ecef
+  double dx = ecef_current.x - ecef_origin.x;
+  double dy = ecef_current.y - ecef_origin.y;
+  double dz = ecef_current.z - ecef_origin.z;
+
+  NED ned;
+  // Transformation matrix
+  ned.n = -sin(lat_origin_rad) * cos(lon_origin_rad) * dx - sin(lat_origin_rad) * sin(lon_origin_rad) * dy + cos(lat_origin_rad) * dz;
+  ned.e = -sin(lon_origin_rad) * dx + cos(lon_origin_rad) * dy;
+  ned.d = -cos(lat_origin_rad) * cos(lon_origin_rad) * dx - cos(lat_origin_rad) * sin(lon_origin_rad) * dy - sin(lat_origin_rad) * dz;
+
+  return ned;
+}
+
+void updateDisplay() {
+  display.setCursor(0, 0);
+  display.print("Calibration: ");
+  display.print(systemCal);
+  display.print(gyroCal);
+  display.print(accelCal);
+  display.print(magCal);
+
+
+  // --- Display Accelerometer Data ---
+  display.setCursor(0, 30);
+  display.print("Acc X: ");
+  display.print(acc.x());
+  display.print("   ");
+
+  display.setCursor(0, 60);
+  display.print("Acc Y: ");
+  display.print(acc.y());
+  display.print("   ");
+
+  display.setCursor(0, 90);
+  display.print("Acc Z: ");
+  display.print(acc.z());
+  display.print("   ");
+
+  display.setCursor(0, 120);
+  display.print("Roll: ");
+  display.print(euler.z());
+  display.print("   ");
+
+  display.setCursor(0, 150);
+  display.print("Pitch: ");
+  display.print(euler.y());
+  display.print("   ");
+
+  display.setCursor(0, 180);
+  display.print("Yaw: ");
+  display.print(euler.x());
+  display.print("   ");
+
+  display.setCursor(0, 210);
+  display.print("Angular Velocity X: ");
+  display.print(gyro.x());
+  display.print("   ");
+
+  display.setCursor(0, 240);
+  display.print("Angular Velocity Y: ");
+  display.print(gyro.y());
+  display.print("   ");
+
+  display.setCursor(0, 270);
+  display.print("Angular Velocity Z: ");
+  display.print(gyro.z() * -1);
+  display.print("   ");
+
+  display.setCursor(0, 300);
+  display.print("Latitude: ");
+  display.print(gps.location.isValid() ? gps.location.lat() : 0.0, 4);
+  display.print("   ");
+
+  display.setCursor(0, 330);
+  display.print("Longitude: ");
+  display.print(gps.location.isValid() ? gps.location.lng() : 0.0, 4);
+  display.print("   ");
+
+  display.setCursor(300, 60);
+  display.print("Motor");
+  display.setCursor(420, 60);
+  display.print("Omega");
+  display.setCursor(540, 60);
+  display.print("Distance (m)");
+
+  display.setCursor(0, 360);
+  display.print("Position (meters): North=");
+  display.print(ned_position.n, 2);  // Print with 2 decimal places
+  display.print("   ");
+
+
+  display.setCursor(0, 390);
+  display.print(", East=");
+  display.print(ned_position.e, 2);
+  display.print("   ");
+}
+
+void setup(void) {
+  Serial.begin(115200);
+  delay(1000); //
+  
+  // Start the serial port for the GPS module
+  GPS_SERIAL.begin(GPSBaud);
+  Wire.begin();
+
+  // Set to NDOF fusion mode
+  bno.begin();
+  //bno.setMode(OPERATION_MODE_NDOF);
+
+  // Calibrating the IMU****************************************************************************************
+  float ax_samples[CALIBRATION_SAMPLES];
+  float ay_samples[CALIBRATION_SAMPLES];
+  float omega_samples[CALIBRATION_SAMPLES];
+  float theta_samples[CALIBRATION_SAMPLES];
+  Serial.print("Starting calibration. Keep the sensor perfectly still for a few seconds...\n");
+
+  for (int i = 0; i < CALIBRATION_SAMPLES; i++) {
+    acc = bno.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
+    gyro = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+    euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+
+    ax_samples[i] = acc.x();
+    ay_samples[i] = acc.y();
+    omega_samples[i] = -gyro.z();  // Yaw Rate
+    theta_samples[i] = euler.x() * PI / 180;
+    delay(5);  // A small delay between samples
+  }
+
+  // B caclculation
+  float sum_ax = 0, sum_ay = 0, sum_omega = 0, sum_theta = 0;
+  for (int i = 0; i < CALIBRATION_SAMPLES; i++) 
+  {
+    sum_ax += ax_samples[i];
+    sum_ay += ay_samples[i];
+    sum_omega += omega_samples[i];
+    sum_theta += theta_samples[i];
+  }
+  bias_ax = sum_ax / CALIBRATION_SAMPLES;
+  bias_ay = sum_ay / CALIBRATION_SAMPLES;
+  bias_omega = sum_omega / CALIBRATION_SAMPLES;  
+  mean_theta = sum_theta / CALIBRATION_SAMPLES; // For theta, it's the mean, not a bias.
+
+  // R calculation
+  float sum_sq_diff_ax = 0, sum_sq_diff_ay = 0, sum_sq_diff_omega = 0, sum_sq_diff_theta = 0;
+  for (int i = 0; i < CALIBRATION_SAMPLES; i++) 
+  {
+    sum_sq_diff_ax += pow(ax_samples[i] - bias_ax, 2);
+    sum_sq_diff_ay += pow(ay_samples[i] - bias_ay, 2);
+    sum_sq_diff_omega += pow(omega_samples[i] - bias_omega, 2);
+    sum_sq_diff_theta += pow(theta_samples[i] - mean_theta, 2);
+  }
+  variance_ax = sum_sq_diff_ax / CALIBRATION_SAMPLES; //calculate the variance in north, east, and down
+  variance_ay = sum_sq_diff_ay / CALIBRATION_SAMPLES;
+  variance_omega = sum_sq_diff_omega / CALIBRATION_SAMPLES;
+  variance_theta = sum_sq_diff_theta / CALIBRATION_SAMPLES;
+
+  Serial.println("Calibration Results:");
+
+  Serial.print("Accel X Bias (m/s^2): ");
+  Serial.println(bias_ax, 6);  // Print with 6 decimal places for precision
+  Serial.print("Accel X Variance (R): ");
+  Serial.println(variance_ax, 6);
+  Serial.println();
+
+  Serial.print("Accel Y Bias (m/s^2): ");
+  Serial.println(bias_ay, 6);
+  Serial.print("Accel Y Variance (R): ");
+  Serial.println(variance_ay, 6);
+  Serial.println();
+
+  Serial.print("Omega Bias (degrees): ");
+  Serial.println(bias_omega, 6);
+  Serial.print("Omega Variance (R): ");
+  Serial.println(variance_omega, 6);
+
+  // Calibrating the GPS****************************************************************************************
+  float sum_north_pos = 0, sum_east_pos = 0;
+  float sum_north_var = 0.0, sum_east_var = 0;
+  double GPS_Samples_north [50];
+  double GPS_Samples_east [50];
+  for (int i = 0; i < GPS_CAL_SAMPLES; i++) 
+  {
+      if (GPS_SERIAL.available() > 0) 
+      {
+        if (gps.encode(GPS_SERIAL.read())) 
+        {
+          if (gps.location.isUpdated() && gps.location.isValid()) 
+          {
+
+            double lat_deg = gps.location.lat();
+            double lon_deg = gps.location.lng();
+            double alt = gps.altitude.meters();  // It's better to use actual altitude
+
+            // Convert degrees from GPS library to radians
+            double lat_rad = lat_deg * (M_PI / 180.0);
+            double lon_rad = lon_deg * (M_PI / 180.0);
+
+            // Convert current lat/lon to ECEF
+            ECEF ecef_current = lon_lat_ToEcef(lat_rad, lon_rad, alt);
+
+            // Set the origin on the first valid fix. Occurs only when origin_is_set = false
+            if (!origin_is_set) 
+            {
+              ecef_origin = ecef_current;
+              alt_origin = alt;
+              lat_origin_rad = lat_rad;
+              lon_origin_rad = lon_rad;
+              origin_is_set = true;
+              Serial.println("Calibration Origin has been set!");
+            }
+            if (origin_is_set) 
+            {
+              ned_position = ecef_ToNed(ecef_current, ecef_origin, lat_origin_rad, lon_origin_rad);
+              sum_north_pos+=ned_position.n;
+              sum_east_pos+=ned_position.e;
+              GPS_Samples_north[i] = ned_position.n;
+              GPS_Samples_east[i] = ned_position.e;
+            }
+        }    // Closes gps.location()
+      } // Closes gps.encode loop
+    } // Closes GPS_SERIAL loop
+  } // Closes while loop
+  bias_North_Pos = sum_north_pos/GPS_CAL_SAMPLES;
+  bias_East_Pos = sum_east_pos/GPS_CAL_SAMPLES;
+
+  for (int i = 0; i < 50; i++)
+  {
+    sum_north_var += (GPS_Samples_north[i] - bias_North_Pos) * (GPS_Samples_north[i] - bias_North_Pos);
+    sum_east_var += (GPS_Samples_east[i] - bias_East_Pos) * (GPS_Samples_east[i] - bias_East_Pos);
+  }
+
+  variance_north = sum_north_var / 50; //double check to make sure this is correct (run serial test to confirm)
+  variance_east = sum_east_var / 50; 
+
+
+  Serial.println(bias_North_Pos);
+  Serial.println(bias_East_Pos);
+
+  display.begin();
+  display.fillScreen(BLACK);
+  display.setRotation(1);
+  display.setTextSize(3);
+  display.setTextColor(WHITE, BLACK);
+
+  for (int i = 0; i < 4; i++) {
+    pinMode(MOTOR_PWM[i], OUTPUT);
+    pinMode(MOTOR_DIRA[i], OUTPUT);
+    pinMode(MOTOR_DIRB[i], OUTPUT);
+    pinMode(ENCODER_A[i], INPUT_PULLUP);
+    pinMode(ENCODER_B[i], INPUT_PULLUP);
+  }
+
+  for (int i = 0; i < 4; i++) {
+    analogWrite(MOTOR_PWM[i], 0);
+    digitalWrite(MOTOR_DIRA[i], LOW);
+    digitalWrite(MOTOR_DIRB[i], LOW);
+  }
+
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A[0]), encoderISR0, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A[1]), encoderISR1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A[2]), encoderISR2, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A[3]), encoderISR3, CHANGE);
+
+
+  K(0, 0) = -50.0;  //multiplied by 30 for greater gain as K was too weak
+  K(0, 1) = 50.0;
+  K(0, 2) = 12.5;
+
+  K(1, 0) = -50.0;
+  K(1, 1) = -50.0;
+  K(1, 2) = -12.5;
+
+  K(2, 0) = -50.0;
+  K(2, 1) = -50.0;
+  K(2, 2) = 12.5;
+
+  K(3, 0) = -50.0;
+  K(3, 1) = 50.0;
+  K(3, 2) = -12.5;
+
+  B(0, 0) = 0.0150;
+  B(0, 1) = 0.0150;
+  B(0, 2) = 0.0150;
+  B(0, 3) = 0.0150;
+
+  B(1, 0) = -0.0150;
+  B(1, 1) = 0.0150;
+  B(1, 2) = 0.0150;
+  B(1, 3) = -0.0150;
+
+  B(2, 0) = -0.0600;
+  B(2, 1) = 0.0600;
+  B(2, 2) = -0.0600;
+  B(2, 3) = 0.0600;
+
+//intializes zeros for identity, A, and B matrix
+for (int i = 0; i < 5; i++)
+{
+  for (int j = 0; j < 5; j++)
+  {
+    I(i, j) = 0;
+    A(i, j) = 0;
+    
+  }
+}
+
+for (int i = 0; i < 5; i++)
+{
+  for (int j = 0; j < 3; j++)
+  {
+    B_state(i, j) = 0;
+  }
+}
+
+
+for (int i = 0; i < 3; i++)
+{
+  for (int j = 0; j < 5; j++)
+  {
+    C(i, j) = 0;
+  }
+}
+
+  I(0, 0) = 1;
+  I(1, 1) = 1;
+  I(2, 2) = 1;
+  I(3, 3) = 1;
+  I(4, 4) = 1;
+
+  B_state(1, 0) = 1;
+  B_state(3, 1) = 1;
+  B_state(4, 2) = 1;
+
+  A(0, 1) = 1;
+  A(2, 3) = 1;
+
+  C(0,0) = 1;
+  C(1, 2) = 1;
+  C(2, 4) = 1;
+  
+  P = 100 * I;
+  Q = 0.1 * I;
+
+  R(0, 0) = variance_north;
+  R(1, 1) = variance_east;
+  R(2, 2) = variance_theta;
+  x_est << -1, 0, 0, 0, 0;
+  x << 0, 0, 0, 0, 0;
+}
+
+
+void loop(void) 
+{
+
+  lastReadTime = millis();
+  unsigned long currentTime{ millis() };
+
+  if (!isCalibrated) {
+    bno.getCalibration(&systemCal, &gyroCal, &accelCal, &magCal);
+    if (gyroCal == 3) {
+      isCalibrated = true;
+    }
+  } else {
+    if (currentTime - lastOuter >= outerLoop) {
+      lastOuter = currentTime;
+      controller();
+    }
+    runPID();
+  }
+
+  if (millis() - prevUpdateTime >= updateInterval) {
+    prevUpdateTime = millis();
+    updateDisplay();
+  }
+}
