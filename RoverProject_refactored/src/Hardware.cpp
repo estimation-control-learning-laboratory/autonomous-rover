@@ -5,8 +5,8 @@
 namespace {
   // Motor pin map
   const int MOTOR_PWM[4]  = { 7, 6, 9, 8 };
-  const int MOTOR_DIRA[4] = { 35, 32, 11, 38 };
-  const int MOTOR_DIRB[4] = { 33, 34, 10, 39 };
+  const int MOTOR_DIRA[4] = { 35, 32, 11, 39 };
+  const int MOTOR_DIRB[4] = { 33, 34, 10, 38 };
 
   const int ENCODER_A[4]  = { A0, 27, A2, 2 };
   const int ENCODER_B[4]  = { A1, 26, A3, 3 };
