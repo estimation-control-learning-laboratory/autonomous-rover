@@ -28,6 +28,8 @@ void Control::outerLoop(const Types::IMUFrame& imu,
   // init K once
   static bool inited=false;
   if (!inited) {
+
+    // These Matrices were computed in Matlab
 K << -50.0,  50.0,  12.5,
        -50.0, -50.0, -12.5,
        -50.0, -50.0,  12.5,
@@ -40,7 +42,7 @@ sigma <<16.6667,  -16.6667,  -4.1667,
        16.6667, 16.6667,  -4.1667,
         16.6667, -16.6667, 4.1667;
     //Matrix<double,3,3> 
-    K_scaled = K/scaling_Factor;
+    K_scaled = K/scaling_Factor; // Scale K matrix 
     B_K = B*K_scaled;
     inited=true;
   }
