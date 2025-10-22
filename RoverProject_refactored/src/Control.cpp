@@ -8,10 +8,15 @@ using namespace Eigen;
 namespace {
   // Allocation matrix K (as in your original)
   Matrix<double,4,3> K;
+  Matrix<double,3,4> B;
+  Matrix<double,3,3> B_K;
+  Matrix<double, 4,3> sigma;
+  Matrix<double, 4,3> K_scaled;
   // PID state
   double pidKp=Config::PID_KP, pidKi=Config::PID_KI, pidKd=Config::PID_KD;
   double pidErr[4]{}, pidLast[4]{}, pidInt[4]{};
   double speedCmd[4]{};
+  double pidSetpoint[4]{};
 }
 
 void Control::outerLoop(const Types::IMUFrame& imu,
@@ -23,10 +28,20 @@ void Control::outerLoop(const Types::IMUFrame& imu,
   // init K once
   static bool inited=false;
   if (!inited) {
-    K << -50.0,  50.0,  12.5,
-         -50.0, -50.0, -12.5,
-         -50.0, -50.0,  12.5,
-          50.0, -50.0, -12.5;
+K << -50.0,  50.0,  12.5,
+       -50.0, -50.0, -12.5,
+       -50.0, -50.0,  12.5,
+        50.0, -50.0, -12.5;
+B << .015, .015,   .015,  0.015,
+      -.015, .015,   0.015, -0.015,
+      -0.06,  0.06,  -0.06,  0.06;
+sigma <<16.6667,  -16.6667,  -4.1667,
+       16.6667, 16.6667, 4.1667,
+       16.6667, 16.6667,  -4.1667,
+        16.6667, -16.6667, 4.1667;
+    //Matrix<double,3,3> 
+    K_scaled = K/scaling_Factor;
+    B_K = B*K_scaled;
     inited=true;
   }
 
@@ -40,7 +55,8 @@ void Control::outerLoop(const Types::IMUFrame& imu,
             (-(Config::CIRC_RATE_RAD_S * tsec) + (M_PI/2.0));
 
   // wheel angular velocity targets
-  Vector4d w = K * (xi - xi_ref);
+  Vector3d U = B_K * (xi - xi_ref);
+  Vector4d w = sigma*U;
   speedCmd[0] = w(1);
   speedCmd[1] = w(0);
   speedCmd[2] = w(2);
