@@ -5,6 +5,7 @@
 #include <ArduinoEigenDense.h>
 using namespace Eigen;
 
+const double scaling_Factor = 1.0;
 namespace {
   // Allocation matrix K (as in your original)
   Matrix<double,4,3> K;
@@ -13,7 +14,8 @@ namespace {
   Matrix<double, 4,3> sigma;
   Matrix<double, 4,3> K_scaled;
   // PID state
-  double pidKp=Config::PID_KP, pidKi=Config::PID_KI, pidKd=Config::PID_KD;
+  //double pidKp=Config::PID_KP, pidKi=Config::PID_KI, pidKd=Config::PID_KD;
+  double pidKp, pidKi, pidKd; // individual PID gains
   double pidErr[4]{}, pidLast[4]{}, pidInt[4]{};
   double speedCmd[4]{};
   double pidSetpoint[4]{};
@@ -56,9 +58,22 @@ sigma <<16.6667,  -16.6667,  -4.1667,
              sin(Config::CIRC_RATE_RAD_S * tsec),
             (-(Config::CIRC_RATE_RAD_S * tsec) + (M_PI/2.0));
 
-  // wheel angular velocity targets
-  Vector3d U = B_K * (xi - xi_ref);
-  Vector4d w = sigma*U;
+  Vector3d error_vec = xi - xi_ref;
+  error_vec(2) = atan2(sin(error_vec(2)), cos(error_vec(2))); //normalize the heading angle, before when it went from 0 to 359, it saw it as a big error even if the angles were close.
+  Vector4d w; //hold the target wheel speeds
+    
+  // set a tolerance to stop the rover when it gets within that tolerance
+  bool at_position = (abs(error_vec(0)) < Config::POSITION_TOLERANCE_M) &&
+                     (abs(error_vec(1)) < Config::POSITION_TOLERANCE_M);
+                      
+  bool at_heading  = (abs(error_vec(2)) < Config::HEADING_TOLERANCE_RAD);
+
+if (at_position && at_heading) {
+    w.setZero();
+  } else {
+    // if outside the tolerance, keep moving
+    w = K * error_vec;
+  }
   speedCmd[0] = w(1);
   speedCmd[1] = w(0);
   speedCmd[2] = w(2);
@@ -68,6 +83,9 @@ sigma <<16.6667,  -16.6667,  -4.1667,
 void Control::innerLoopPID() {
   const double dt = Config::INNER_DT_MS / 1000.0;
   for (int i=0;i<4;++i) {
+    pidKp = Config::PID_KP[i];
+    pidKi = Config::PID_KI[i];
+    pidKd = Config::PID_KD[i];
     const long pulses = Hardware::swapEncoderPulses(i);
     const double revs = double(pulses) / (Config::ENCODER_PPR * Config::GEAR_RATIO);
     const double rpm  = (revs / dt) * 60.0;
@@ -79,7 +97,7 @@ void Control::innerLoopPID() {
     pidLast[i] = pidErr[i];
 
     const double cmd = pidKp*pidErr[i] + pidKi*pidInt[i] + pidKd*der;
-    const int    pwm = constrain(int(fabs(cmd)), 0, 255);
+    const int    pwm = constrain(int(fabs(cmd)), 0, 150); // can cahnge the PWM to saturate the max wheel speed
     const int    dir = (cmd>0) ? +1 : (cmd<0 ? -1 : 0);
 
     Hardware::setMotorPWM(i, pwm, dir);
