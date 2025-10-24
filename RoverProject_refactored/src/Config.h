@@ -21,9 +21,10 @@ namespace Config {
   constexpr int GEAR_RATIO   = 120;
 
   // PID (inner)
-  constexpr double PID_KP = 0.6;
-  constexpr double PID_KI = 0.2;
-  constexpr double PID_KD = 0.0;
+  // Try this first. NEED TO TUNE THESE!!
+  constexpr double PID_KP[4] = {.60, .60, 2.0, 2.0};
+  constexpr double PID_KI[4] = {.5, 0.1, 0.1, 0.2};
+  constexpr double PID_KD[4] = {0.4, 0.4, 0.2, 0.2};
 
   // Calibration samples
   constexpr int CAL_SAMPLES_IMU = 1000;
@@ -32,4 +33,8 @@ namespace Config {
   // Display colors (GIGA)
   constexpr uint16_t BLACK = 0x0000;
   constexpr uint16_t WHITE = 0xFFFF;
+
+  const double MAX_WHEEL_ACCEL_RAD_S2 = 10.0;
+  constexpr double POSITION_TOLERANCE_M  = 0.1;  // 10 cm tolerance for position
+  constexpr double HEADING_TOLERANCE_RAD = 0.05; // 3 degrees tolerance for angle
 }
