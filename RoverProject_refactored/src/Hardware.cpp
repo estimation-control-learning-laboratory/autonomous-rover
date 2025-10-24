@@ -49,7 +49,7 @@ long Hardware::swapEncoderPulses(int idx) {
 void Hardware::encoderISR0(){ int A=digitalRead(A0), B=digitalRead(A1); encPulses[0]+= (A==B)?-1:+1; }
 void Hardware::encoderISR1(){ int A=digitalRead(27), B=digitalRead(26); encPulses[1]+= (A==B)?+1:-1; }
 void Hardware::encoderISR2(){ int A=digitalRead(A2), B=digitalRead(A3); encPulses[2]+= (A==B)?-1:+1; }
-void Hardware::encoderISR3(){ int A=digitalRead(2 ), B=digitalRead(3 ); encPulses[3]+= (A==B)?-1:+1; }
+void Hardware::encoderISR3(){ int A=digitalRead(2 ), B=digitalRead(3 ); encPulses[3]+= (A==B)?+1:-1; }
 
 // Optional I2C override (address 8) using your MotorDataPacket
 void Hardware::pollI2COverride() {
