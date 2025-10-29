@@ -22,9 +22,9 @@ namespace Config {
 
   // PID (inner)
   // Try this first. NEED TO TUNE THESE!!
-  constexpr double PID_KP[4] = {.60, .60, 2.0, 2.0};
-  constexpr double PID_KI[4] = {.5, 0.1, 0.1, 0.2};
-  constexpr double PID_KD[4] = {0.4, 0.4, 0.2, 0.2};
+  constexpr double PID_KP[4] ={2, 2, 2, 2};
+  constexpr double PID_KI[4] = {.2, 0.2, 0.2, 0.2};
+  constexpr double PID_KD[4] = {0.0, 0.0, 0.0, 0.0};
 
   // Calibration samples
   constexpr int CAL_SAMPLES_IMU = 1000;
