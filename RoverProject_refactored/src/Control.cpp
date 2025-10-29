@@ -5,14 +5,13 @@
 #include <ArduinoEigenDense.h>
 using namespace Eigen;
 
-const double scaling_Factor = 1.0;
 namespace {
   // Allocation matrix K (as in your original)
   Matrix<double,4,3> K;
   Matrix<double,3,4> B;
-  Matrix<double,3,3> B_K;
+  Matrix<double,3,3> K_diag;
   Matrix<double, 4,3> sigma;
-  Matrix<double, 4,3> K_scaled;
+  Matrix<double, 3,3> U;
   // PID state
   //double pidKp=Config::PID_KP, pidKi=Config::PID_KI, pidKd=Config::PID_KD;
   double pidKp, pidKi, pidKd; // individual PID gains
@@ -32,20 +31,19 @@ void Control::outerLoop(const Types::IMUFrame& imu,
   if (!inited) {
 
     // These Matrices were computed in Matlab
-K << -50.0,  50.0,  12.5,
-       -50.0, -50.0, -12.5,
-       -50.0, -50.0,  12.5,
-        50.0, -50.0, -12.5;
+K_diag << -25.0,  0.0,  0.0,
+               0.0, -25.0,  0.0,
+               0.0,  0.0, -25.0;
+    
 B << .015, .015,   .015,  0.015,
       -.015, .015,   0.015, -0.015,
       -0.06,  0.06,  -0.06,  0.06;
+    
 sigma <<16.6667,  -16.6667,  -4.1667,
        16.6667, 16.6667, 4.1667,
        16.6667, 16.6667,  -4.1667,
         16.6667, -16.6667, 4.1667;
-    //Matrix<double,3,3> 
-    K_scaled = K/scaling_Factor; // Scale K matrix 
-    B_K = B*K_scaled;
+
     inited=true;
   }
 
@@ -72,7 +70,8 @@ if (at_position && at_heading) {
     w.setZero();
   } else {
     // if outside the tolerance, keep moving
-    w = K * error_vec;
+    Vector3d U_vel = K_diag * error_vec;
+    w = sigma * U_vel; // This is the fixed control law
   }
   speedCmd[0] = w(1);
   speedCmd[1] = w(0);
