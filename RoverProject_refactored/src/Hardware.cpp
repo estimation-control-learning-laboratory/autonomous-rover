@@ -5,8 +5,8 @@
 namespace {
   // Motor pin map
   const int MOTOR_PWM[4]  = { 7, 6, 9, 8 };
-  const int MOTOR_DIRA[4] = { 35, 32, 11, 39 };
-  const int MOTOR_DIRB[4] = { 33, 34, 10, 38 };
+  const int MOTOR_DIRA[4] = { 35, 32, 11, 38 };
+  const int MOTOR_DIRB[4] = { 33, 34, 10, 39 };
 
   const int ENCODER_A[4]  = { A0, 27, A2, 2 };
   const int ENCODER_B[4]  = { A1, 26, A3, 3 };
@@ -49,7 +49,7 @@ long Hardware::swapEncoderPulses(int idx) {
 void Hardware::encoderISR0(){ int A=digitalRead(A0), B=digitalRead(A1); encPulses[0]+= (A==B)?-1:+1; }
 void Hardware::encoderISR1(){ int A=digitalRead(27), B=digitalRead(26); encPulses[1]+= (A==B)?+1:-1; }
 void Hardware::encoderISR2(){ int A=digitalRead(A2), B=digitalRead(A3); encPulses[2]+= (A==B)?-1:+1; }
-void Hardware::encoderISR3(){ int A=digitalRead(2 ), B=digitalRead(3 ); encPulses[3]+= (A==B)?+1:-1; }
+void Hardware::encoderISR3(){ int A=digitalRead(2 ), B=digitalRead(3 ); encPulses[3]+= (A==B)?-1:+1; }
 
 // Optional I2C override (address 8) using your MotorDataPacket
 void Hardware::pollI2COverride() {
